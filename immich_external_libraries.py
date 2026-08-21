@@ -787,11 +787,13 @@ def reconcile_album_renames(args, owner_keys, manifest) -> None:
     stale: list[str] = []
     for source_id, info in manifest["albums"].items():
         old = info.get("name")
-        member_albums = info.get("member_albums") or {info.get("owner"): source_id}
+        owner = info.get("owner")
+        member_albums = info.setdefault("member_albums", {owner: source_id})
 
-        # Aktuelle Namen aller getrackten Mitglieder-Alben einsammeln.
+        # Aktuelle Namen aller getrackten Mitglieder-Alben einsammeln; nicht mehr
+        # erreichbare (geloeschte) Mitglieder-Alben aus member_albums putzen.
         current: dict[str, str] = {}  # album_id -> aktueller Name
-        for uid, aid in member_albums.items():
+        for uid, aid in list(member_albums.items()):
             key = owner_keys.get(uid)
             if not key:
                 continue
@@ -799,12 +801,16 @@ def reconcile_album_renames(args, owner_keys, manifest) -> None:
                                 tolerant=True, quiet=True)
             if album:
                 current[aid] = (album.get("albumName") or "").strip()
-        # Quell-Album gar nicht mehr da -> Eintrag ist veraltet.
+            else:
+                member_albums.pop(uid, None)  # totes Mitglieder-Album
+
+        # Ist das Owner-Album (= Quell-Album) weg, ist die ganze Einheit veraltet.
+        owner_key = owner_keys.get(owner)
+        if owner_key and not api_request(args.url, f"/api/albums/{source_id}",
+                                         owner_key, tolerant=True, quiet=True):
+            stale.append(source_id)
+            continue
         if not current:
-            key = owner_keys.get(info.get("owner"))
-            if key and not api_request(args.url, f"/api/albums/{source_id}", key,
-                                       tolerant=True, quiet=True):
-                stale.append(source_id)
             continue
 
         changed = sorted({n for n in current.values() if n and n != old})
@@ -999,6 +1005,12 @@ def share_collect_uploads(args, users, owner_keys, libraries, manifest) -> list[
                 continue
             album_id = (info.get("member_albums") or {}).get(owner_id)
             if not album_id:
+                continue
+            # Getrackte ID koennte veraltet sein (Album geloescht) -> tolerant
+            # pruefen und ggf. aus member_albums entfernen, statt zu crashen.
+            if not api_request(args.url, f"/api/albums/{album_id}", key,
+                               tolerant=True, quiet=True):
+                info.get("member_albums", {}).pop(owner_id, None)
                 continue
             album_assets = search_all(args.url, key, {"albumIds": [album_id]})
             candidates = [a for a in album_assets
