@@ -563,8 +563,20 @@ def group_hash(member_ids: list[str]) -> str:
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
 
 
+def _album_user_id(u: dict) -> str | None:
+    return (u.get("user") or {}).get("id") or u.get("userId")
+
+
 def album_owner_id(album: dict) -> str | None:
-    """Owner-ID eines Albums - je nach Immich-Version 'ownerId' oder 'owner.id'."""
+    """Owner-ID eines Albums.
+
+    Immich v3 hat 'ownerId'/'owner' aus dem Album entfernt - der Owner ist nun
+    der albumUsers-Eintrag mit role 'owner'. Fuer aeltere Versionen faellt die
+    Funktion auf 'ownerId'/'owner.id' zurueck.
+    """
+    for u in album.get("albumUsers") or []:
+        if u.get("role") == "owner":
+            return _album_user_id(u)
     return album.get("ownerId") or (album.get("owner") or {}).get("id")
 
 
@@ -572,7 +584,7 @@ def album_members(album: dict) -> list[str]:
     """Liefert die sortierte Mitglieder-Liste eines Albums (Owner + geteilt-mit)."""
     ids = {album_owner_id(album)}
     for u in album.get("albumUsers") or []:
-        uid = u.get("userId") or (u.get("user") or {}).get("id")
+        uid = _album_user_id(u)
         if uid:
             ids.add(uid)
     return sorted(i for i in ids if i)
@@ -611,17 +623,22 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
     result: list[dict] = []
     for owner_id, key in owner_keys.items():
         albums = api_request(args.url, "/api/albums", key) or []
-        owned = [a for a in albums if album_owner_id(a) == owner_id]
+        owned = 0
         shared_here = 0
-        for album in owned:
+        foreign: list[dict] = []
+        for album in albums:
             if album["id"] in seen:
                 continue
-            # Die Listen-Ansicht liefert albumUsers je nach Version nicht mit,
-            # daher das Detail laden, sobald die Freigabe-Info fehlt.
+            # Der Owner steckt in albumUsers - liefert die Listen-Ansicht das
+            # nicht mit, muss das Album-Detail geladen werden.
             if not album.get("albumUsers"):
                 detail = api_request(args.url, f"/api/albums/{album['id']}", key)
                 if detail:
                     album = detail
+            if album_owner_id(album) != owner_id:
+                foreign.append(album)
+                continue
+            owned += 1
             members = album_members(album)
             if len(members) < 2:
                 continue  # nicht geteilt -> nicht Teil einer Gruppe
@@ -630,13 +647,10 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
             result.append({"id": album["id"], "name": album.get("albumName"),
                            "owner_id": owner_id, "key": key, "members": members})
         print(f"  {user_label(users, owner_id)}: {len(albums)} sichtbar, "
-              f"{len(owned)} eigene, {shared_here} davon geteilt")
-        # Nur mit-geteilte (fremde) Alben nennen - so sieht man, wessen Key noch
-        # fehlt, um sie verarbeiten zu koennen.
-        for a in albums:
-            if album_owner_id(a) != owner_id:
-                print(f"      (fremd) '{a.get('albumName')}' gehoert "
-                      f"{user_label(users, album_owner_id(a))} - Key fehlt")
+              f"{owned} eigene, {shared_here} davon geteilt")
+        for a in foreign:
+            print(f"      (fremd) '{a.get('albumName')}' gehoert "
+                  f"{user_label(users, album_owner_id(a))} - Key fehlt")
     return result
 
 
