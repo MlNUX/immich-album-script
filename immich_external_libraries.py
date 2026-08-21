@@ -676,9 +676,18 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
             members = album_members(album)
             if len(members) < 2:
                 continue  # nicht geteilt -> nicht Teil einer Gruppe
+            name = (album.get("albumName") or "").strip()
+            if not name:
+                # Ohne Namen gaebe es keinen Ordnernamen -> Bilder wuerden ohne
+                # Album externalisiert (und Originale geloescht). Lieber skippen,
+                # bis der Nutzer das Album benennt (nicht in 'seen' -> spaeter
+                # erneut geprueft).
+                print(f"      WARNUNG: geteiltes Album {album['id']} hat keinen "
+                      f"Namen - uebersprungen. Bitte im Immich-UI benennen.")
+                continue
             shared_here += 1
             seen.add(album["id"])
-            result.append({"id": album["id"], "name": album.get("albumName"),
+            result.append({"id": album["id"], "name": name,
                            "owner_id": owner_id, "key": key, "members": members})
         print(f"  {user_label(users, owner_id)}: {len(albums)} sichtbar, "
               f"{owned} eigene, {shared_here} davon geteilt")
