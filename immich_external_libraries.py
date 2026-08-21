@@ -563,9 +563,14 @@ def group_hash(member_ids: list[str]) -> str:
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
 
 
+def album_owner_id(album: dict) -> str | None:
+    """Owner-ID eines Albums - je nach Immich-Version 'ownerId' oder 'owner.id'."""
+    return album.get("ownerId") or (album.get("owner") or {}).get("id")
+
+
 def album_members(album: dict) -> list[str]:
     """Liefert die sortierte Mitglieder-Liste eines Albums (Owner + geteilt-mit)."""
-    ids = {album.get("ownerId")}
+    ids = {album_owner_id(album)}
     for u in album.get("albumUsers") or []:
         uid = u.get("userId") or (u.get("user") or {}).get("id")
         if uid:
@@ -606,7 +611,7 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
     result: list[dict] = []
     for owner_id, key in owner_keys.items():
         albums = api_request(args.url, "/api/albums", key) or []
-        owned = [a for a in albums if a.get("ownerId") == owner_id]
+        owned = [a for a in albums if album_owner_id(a) == owner_id]
         shared_here = 0
         for album in owned:
             if album["id"] in seen:
@@ -629,9 +634,9 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
         # Nur mit-geteilte (fremde) Alben nennen - so sieht man, wessen Key noch
         # fehlt, um sie verarbeiten zu koennen.
         for a in albums:
-            if a.get("ownerId") != owner_id:
+            if album_owner_id(a) != owner_id:
                 print(f"      (fremd) '{a.get('albumName')}' gehoert "
-                      f"{user_label(users, a.get('ownerId'))} - Key fehlt")
+                      f"{user_label(users, album_owner_id(a))} - Key fehlt")
     return result
 
 
