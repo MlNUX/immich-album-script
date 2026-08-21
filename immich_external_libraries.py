@@ -103,11 +103,13 @@ def load_config(path: str) -> None:
 
 
 def api_request(base_url: str, path: str, api_key: str, method: str = "GET",
-                body: dict | None = None, tolerant: bool = False):
+                body: dict | None = None, tolerant: bool = False,
+                quiet: bool = False):
     """Fuehrt einen Request gegen die Immich API aus und liefert JSON zurueck.
 
-    Mit tolerant=True fuehrt ein HTTP-Fehler nicht zum Abbruch, sondern gibt eine
-    Warnung aus und liefert None zurueck (fuer nicht-kritische Loeschungen).
+    Mit tolerant=True fuehrt ein HTTP-Fehler nicht zum Abbruch, sondern liefert
+    None zurueck (fuer nicht-kritische Aufrufe). quiet=True unterdrueckt dabei
+    zusaetzlich die Warnung (fuer erwartbare Fehler, z.B. geloeschte Objekte).
     """
     url = base_url.rstrip("/") + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -122,7 +124,8 @@ def api_request(base_url: str, path: str, api_key: str, method: str = "GET",
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
         if tolerant:
-            print(f"  WARNUNG: HTTP {exc.code} bei {method} {path}: {detail}")
+            if not quiet:
+                print(f"  WARNUNG: HTTP {exc.code} bei {method} {path}: {detail}")
             return None
         sys.exit(f"HTTP {exc.code} bei {method} {path}: {detail}")
     except error.URLError as exc:
@@ -758,14 +761,18 @@ def reconcile_album_renames(args, owner_keys, manifest, host_root) -> None:
     (nun leeren) Alben entfernt Phase 5. Nur der Owner-Rename zaehlt - nur sein
     Album ist im Manifest hinterlegt.
     """
+    stale: list[str] = []
     for album_id, info in manifest["albums"].items():
         key = owner_keys.get(info.get("owner"))
         if not key:
             continue
         album = api_request(args.url, f"/api/albums/{album_id}", key,
-                            tolerant=True)
+                            tolerant=True, quiet=True)
         if not album:
-            continue  # geloescht o.ae. - hier nicht behandelt
+            # Album existiert nicht mehr (vom Owner geloescht) -> Eintrag
+            # entfernen, damit er nicht bei jedem Lauf erneut Fehler wirft.
+            stale.append(album_id)
+            continue
         current = (album.get("albumName") or "").strip()
         old = info.get("name")
         if not current or current == old:
@@ -782,6 +789,11 @@ def reconcile_album_renames(args, owner_keys, manifest, host_root) -> None:
         info["name"] = current
         print(f"  Album umbenannt: '{old}' -> '{current}' ({ghash}) - "
               f"Mitglieder-Alben ziehen nach.")
+
+    for album_id in stale:
+        manifest["albums"].pop(album_id, None)
+        print(f"  getracktes Album {album_id} nicht mehr vorhanden - aus "
+              f"Manifest entfernt.")
 
 
 def sync_shared_albums(args, users, owner_keys) -> list[dict]:
