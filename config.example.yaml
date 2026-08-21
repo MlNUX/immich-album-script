@@ -1,0 +1,27 @@
+# Vorlage fuer die Zugangsdaten. Kopieren nach 'config.yaml' und ausfuellen:
+#   cp config.example.yaml config.yaml
+# config.yaml ist per .gitignore vom Repo ausgeschlossen (enthaelt Secrets).
+
+# Basis-URL + Admin-API-Key deiner Immich-Instanz.
+immich_url: "https://immich.example.com"
+admin_api_key: "APIKEY"
+
+# Weitere Nutzer -> deren eigener API-Key (Key im Web-UI unter
+# Account-Einstellungen -> API Keys erstellen). Schluessel darf E-Mail oder
+# User-ID sein. Der Admin-Nutzer selbst muss hier NICHT eingetragen werden.
+user_api_keys:
+  "user@example.com": "APIKEY"
+
+# Fuer die Rueckrichtung noetig: Mapping vom Immich-Import-Pfad (wie in der
+# Library hinterlegt, z.B. /external/test) zum tatsaechlichen Pfad auf DIESEM
+# Host. Laeuft Immich in Docker, ist /external der Container-Pfad; auf dem Host
+# liegt der Ordner per Volume-Mount evtl. woanders. Laengster passender Praefix
+# gewinnt.
+import_path_map:
+  "/external": "/mnt/external"
+
+# Optional: Share-Sync (Phase S). Wurzel (Immich-Container-Pfad), unter der die
+# Permutations-Ordner geteilter Alben angelegt werden. Muss ueber
+# import_path_map auf einen Host-Pfad abbildbar sein. Leer/weggelassen =>
+# Share-Sync ist aus. Siehe README.md (Abschnitt "Share-Sync").
+external_root: "/external"

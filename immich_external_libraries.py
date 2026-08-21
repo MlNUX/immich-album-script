@@ -1,76 +1,105 @@
 #!/usr/bin/env python3
-"""Synchronisiert External-Library-Unterordner mit gleichnamigen Alben (beide Richtungen).
-
-Pro direktem Unterordner einer Library wird ein Album mit dem Ordnernamen
-angelegt (nur erste Ebene; tiefer liegende Bilder zaehlen zum Album ihres
-obersten Unterordners). Bilder direkt im Wurzelordner der Library werden
-uebersprungen.
-
-Ein Lauf fuehrt mehrere Phasen aus (Reihenfolge ist wichtig, damit auch geteilte
-Ordner, manuell abgelegte Dateien und Loeschungen fuer ALLE Nutzer korrekt sind):
-
-  0. Loescht ein Nutzer ein externes Album-Bild (-> Papierkorb), wird dessen
-     DATEI im Ordner geloescht und das Asset bei ALLEN Nutzern endgueltig
-     entfernt ('einmal loeschen = ueberall weg'). Unwiderruflich.
-  1. Ergaenzte Uploads aus den Unterordner-Alben in den passenden Unterordner der
-     jeweiligen Library kopieren (deterministischer Dateiname, keine Duplikate).
-  2. ALLE Libraries scannen und warten, bis der Import durch ist (faengt auch
-     manuell in den Ordner gelegte Dateien ab).
-  3. Alle Library-Assets in die (ggf. neu angelegten) Unterordner-Alben
-     aufnehmen - so sehen alle Nutzer denselben Ordnerinhalt in ihrem Album.
-  4. Die erfolgreich importierten Uploads ENDGUELTIG loeschen (kein Papierkorb).
-
-Owner-Modell / Pro-User Keys:
-    Ein Album gehoert immer dem Nutzer, dem der benutzte API-Key gehoert, und
-    die Immich-Suche liefert nur Assets dieses Nutzers. Ein Admin kann NICHT auf
-    die Assets anderer Nutzer zugreifen. Damit auch fremde Libraries verarbeitet
-    werden, wird pro Library der API-Key des jeweiligen Owners benutzt.
-
-    - ADMIN_API_KEY: listet Nutzer + Libraries und wird automatisch fuer den
-      eigenen Nutzer (dem der Admin-Key gehoert) verwendet.
-    - USER_API_KEYS: Zuordnung weiterer Nutzer -> deren API-Key (per E-Mail
-      oder User-ID). Nutzer ohne hinterlegten Key werden uebersprungen.
-
-Beispiele:
-    ./immich_external_libraries.py                 # beide Richtungen, alle Libraries
-    ./immich_external_libraries.py --library test1 # nur Library 'test1'
-"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 from collections import defaultdict
 from urllib import error, request
 
 # ===========================================================================
-# HIER EINTRAGEN: Domain + Admin-API-Key deiner Immich-Instanz.
-IMMICH_URL = "DOMAIN"
-ADMIN_API_KEY = "APIKEY"
+# Zugangsdaten (URL + API-Keys) und Pfad-Mappings stehen in einer YAML-Config,
+# standardmaessig 'config.yaml' neben diesem Script (per --config aenderbar).
+# Vorlage: 'config.example.yaml'. Die folgenden Globals werden beim Start aus
+# der Config befuellt (siehe load_config()).
+DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "config.yaml")
 
-# Weitere Nutzer -> deren eigener API-Key (Key im Web-UI unter
-# Account-Einstellungen -> API Keys erstellen). Schluessel darf E-Mail oder
-# User-ID sein. Der Admin-Nutzer selbst muss hier NICHT eingetragen werden.
-USER_API_KEYS: dict[str, str] = {
-    "EMAIL": "APIKEY",
-}
-
-# Fuer die Rueckrichtung noetig: Mapping vom Immich-Import-Pfad (wie in der Library
-# hinterlegt, z.B. /external/test) zum tatsaechlichen Pfad auf DIESEM Host.
-# Laeuft Immich in Docker, ist /external der Container-Pfad; auf dem Host liegt
-# der Ordner per Volume-Mount evtl. woanders. Laengster passender Praefix
-# gewinnt. Beispiel: {"/external": "/mnt/photos"}.
-IMPORT_PATH_MAP: dict[str, str] = {
-    "/external": "/mnt/external",
-}
+IMMICH_URL = ""
+ADMIN_API_KEY = ""
+USER_API_KEYS: dict[str, str] = {}
+IMPORT_PATH_MAP: dict[str, str] = {}
+# Wurzel (Immich-Container-Pfad), unter der die Permutations-Ordner der
+# Share-Funktion liegen, z.B. "/external". Muss ueber IMPORT_PATH_MAP auf einen
+# Host-Pfad abbildbar sein. Leer => Share-Sync (Phase S) ist deaktiviert.
+EXTERNAL_ROOT = ""
 # ===========================================================================
 
 CHUNK = 500        # Assets pro Album-Add-Request
 SCAN_TIMEOUT = 180  # Sekunden, die auf den Import nach einem Library-Scan gewartet wird
 SCAN_INTERVAL = 3   # Sekunden zwischen den Poll-Versuchen
+MANIFEST_NAME = ".immich_groups.json"  # Zustandsdatei im External-Wurzelordner
+
+
+def _unquote(s: str) -> str:
+    """Entfernt umschliessende einfache/doppelte Anfuehrungszeichen."""
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        return s[1:-1]
+    return s
+
+
+def _parse_simple_yaml(text: str) -> dict:
+    """Minimaler YAML-Parser fuer das Config-Format (Fallback ohne PyYAML).
+
+    Unterstuetzt genau, was die Config braucht: Top-Level 'key: value'-Skalare
+    sowie eine Ebene eingerueckter 'key: value'-Maps. Kommentare (#), Leerzeilen
+    und Anfuehrungszeichen werden beruecksichtigt.
+    """
+    result: dict = {}
+    current_map: dict | None = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        # Ganzzeilige Kommentare und Leerzeilen ueberspringen.
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        # Inline-Kommentar (nur nach Whitespace) abschneiden.
+        if " #" in line:
+            line = line[:line.index(" #")].rstrip()
+        if ":" not in line:
+            continue
+        indented = line[0] in " \t"
+        k, _, v = line.strip().partition(":")
+        key, val = _unquote(k.strip()), _unquote(v.strip())
+        if indented:
+            if current_map is not None:
+                current_map[key] = val
+        elif val == "":            # leerer Wert -> beginnt eine eingerueckte Map
+            current_map = {}
+            result[key] = current_map
+        else:
+            result[key] = val
+            current_map = None
+    return result
+
+
+def load_config(path: str) -> None:
+    """Laedt URL, API-Keys und Pfad-Mappings aus der YAML-Config in die Globals.
+
+    Nutzt PyYAML, falls installiert, sonst den eingebauten Minimal-Parser.
+    """
+    global IMMICH_URL, ADMIN_API_KEY, USER_API_KEYS, IMPORT_PATH_MAP
+    if not os.path.exists(path):
+        sys.exit(f"Config-Datei '{path}' nicht gefunden. Kopiere config.example.yaml "
+                 f"nach config.yaml und trage deine Daten ein.")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    try:
+        import yaml  # optional, robuster als der Fallback
+        data = yaml.safe_load(text) or {}
+    except ModuleNotFoundError:
+        data = _parse_simple_yaml(text)
+
+    global EXTERNAL_ROOT
+    IMMICH_URL = data.get("immich_url") or ""
+    ADMIN_API_KEY = data.get("admin_api_key") or ""
+    USER_API_KEYS = data.get("user_api_keys") or {}
+    IMPORT_PATH_MAP = data.get("import_path_map") or {}
+    EXTERNAL_ROOT = data.get("external_root") or ""
 
 
 def api_request(base_url: str, path: str, api_key: str, method: str = "GET",
@@ -198,6 +227,20 @@ def scan_library(base_url: str, admin_key: str, library_id: str) -> None:
     """Stoesst einen Scan der Library an (importiert neue Dateien)."""
     api_request(base_url, f"/api/libraries/{library_id}/scan", admin_key,
                 method="POST")
+
+
+def create_library(base_url: str, admin_key: str, owner_id: str, name: str,
+                   import_path: str) -> dict:
+    """Legt eine External Library fuer einen Nutzer auf genau einen Import-Pfad an.
+
+    Library-Verwaltung ist Admin-Sache, daher wird der Admin-Key benutzt; der
+    'ownerId' bestimmt, wem die Library (und damit die importierten Assets)
+    gehoert.
+    """
+    return api_request(
+        base_url, "/api/libraries", admin_key, method="POST",
+        body={"ownerId": owner_id, "name": name, "importPaths": [import_path]},
+    )
 
 
 def map_to_host_path(import_path: str) -> str | None:
@@ -496,25 +539,245 @@ def delete_imported_uploads(args, pending, imported) -> None:
               f"deren Uploads bleiben erhalten: {', '.join(sorted(undeleted))}")
 
 
+# ---------------------------------------------------------------------------
+# Phase S: geteilte Alben -> External-Permutationsordner (append-only).
+#
+# Idee: Teilt ein Nutzer sein Album mit anderen, sollen ALLE Beteiligten die
+# Bilder gleichberechtigt als eigene External-Assets bekommen - statt des
+# Immich-"Owner + Gast"-Modells. Dazu werden die Bilder in einen Ordner
+# external/<hash der Nutzergruppe>/<albumname>/ verschoben und jedes
+# Gruppenmitglied bekommt eine eigene External Library auf external/<hash>.
+# Die restliche Arbeit (pro Nutzer ein gleichnamiges Album) macht die
+# bestehende Ordner<->Album-Engine (Phasen 2-4).
+#
+# Mitgliedschaft ist bewusst append-only: es kann nur jemand DAZUkommen. Waechst
+# die Gruppe (z.B. {A,B} -> {A,B,C}), zieht der Album-Ordner in den groesseren
+# Permutationsordner um. Permutationsordner + Libraries werden nie geloescht
+# (auch leer nicht) und bei gleicher Gruppe wiederverwendet.
+# ---------------------------------------------------------------------------
+
+
+def group_hash(member_ids: list[str]) -> str:
+    """Deterministischer Kurz-Hash einer Nutzergruppe (Reihenfolge egal)."""
+    joined = "\n".join(sorted(member_ids))
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def album_members(album: dict) -> list[str]:
+    """Liefert die sortierte Mitglieder-Liste eines Albums (Owner + geteilt-mit)."""
+    ids = {album.get("ownerId")}
+    for u in album.get("albumUsers") or []:
+        uid = u.get("userId") or (u.get("user") or {}).get("id")
+        if uid:
+            ids.add(uid)
+    return sorted(i for i in ids if i)
+
+
+def load_manifest(host_root: str) -> dict:
+    """Laedt die Zustandsdatei (welches Album gehoert zu welcher Gruppe)."""
+    path = os.path.join(host_root, MANIFEST_NAME)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data.setdefault("albums", {})
+        data.setdefault("groups", {})
+        return data
+    return {"albums": {}, "groups": {}}
+
+
+def save_manifest(host_root: str, manifest: dict) -> None:
+    path = os.path.join(host_root, MANIFEST_NAME)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, ensure_ascii=False)
+
+
+def user_label(users: dict, uid: str) -> str:
+    return users.get(uid, {}).get("email") or uid
+
+
+def collect_shared_albums(args, users, owner_keys) -> list[dict]:
+    """Sammelt alle nativ geteilten QUELL-Alben, deren Owner einen API-Key hat.
+
+    Nur eigene Alben des jeweiligen Key-Besitzers (nicht die Gast-Kopien anderer)
+    und nur solche mit mindestens einem weiteren Mitglied. Fuer geteilte Alben
+    ohne albumUsers in der Listenansicht wird das Album-Detail nachgeladen.
+    """
+    seen: set[str] = set()
+    result: list[dict] = []
+    for owner_id, key in owner_keys.items():
+        for album in api_request(args.url, "/api/albums", key) or []:
+            if album["id"] in seen or album.get("ownerId") != owner_id:
+                continue
+            if album.get("shared") and not album.get("albumUsers"):
+                album = api_request(args.url, f"/api/albums/{album['id']}", key)
+            members = album_members(album)
+            if len(members) < 2:
+                continue  # nicht geteilt -> nicht Teil einer Gruppe
+            seen.add(album["id"])
+            result.append({"id": album["id"], "name": album.get("albumName"),
+                           "owner_id": owner_id, "key": key, "members": members})
+    return result
+
+
+def libs_owning_path(libraries: list[dict], container_path: str) -> set[str]:
+    """Owner-IDs, die bereits eine Library auf container_path haben."""
+    target = container_path.rstrip("/")
+    return {lib["ownerId"] for lib in libraries
+            if target in [ip.rstrip("/") for ip in (lib.get("importPaths") or [])]}
+
+
+def ensure_group_libraries(args, users, members, ghash, libraries) -> list[dict]:
+    """Stellt sicher, dass jedes Gruppenmitglied eine Library auf external/<hash> hat.
+
+    Legt fehlende an (idempotent, da Ordner/Libraries wiederverwendet werden) und
+    liefert die ergaenzte Library-Liste zurueck.
+    """
+    container = f"{EXTERNAL_ROOT.rstrip('/')}/{ghash}"
+    have = libs_owning_path(libraries, container)
+    for uid in members:
+        if uid in have:
+            continue
+        if uid not in users:
+            print(f"      WARNUNG: Nutzer {uid} unbekannt - keine Library angelegt.")
+            continue
+        lib = create_library(args.url, args.admin_key, uid, f"shared-{ghash}",
+                             container)
+        libraries.append(lib)
+        print(f"      Library angelegt fuer {user_label(users, uid)} -> {container}")
+    return libraries
+
+
+def sync_shared_albums(args, users, owner_keys) -> list[dict]:
+    """Phase S: geteilte Alben externalisieren bzw. in groessere Gruppe umziehen.
+
+    Liefert offene Original-Loeschungen im selben Format wie collect_uploads
+    ({key, upload_id, filename, library_id}), damit scan_and_wait /
+    delete_imported_uploads sie nach dem Import mitverarbeiten.
+    """
+    host_root = map_to_host_path(EXTERNAL_ROOT)
+    if host_root is None:
+        print(f"  uebersprungen: external_root '{EXTERNAL_ROOT}' nicht in "
+              f"import_path_map gemappt.")
+        return []
+
+    manifest = load_manifest(host_root)
+    albums = collect_shared_albums(args, users, owner_keys)
+    if not albums:
+        print("  keine geteilten Alben gefunden.")
+        return []
+
+    libraries = get_external_libraries(args.url, args.admin_key)
+    pending: list[dict] = []
+
+    for alb in albums:
+        members = alb["members"]
+        new_hash = group_hash(members)
+        prev = manifest["albums"].get(alb["id"])
+        prev_hash = prev.get("hash") if prev else None
+
+        labels = ", ".join(user_label(users, m) for m in members)
+        print(f"\n  Album '{alb['name']}' (Owner {user_label(users, alb['owner_id'])}), "
+              f"Gruppe [{labels}] -> {new_hash}")
+
+        target_host_dir = os.path.join(host_root, new_hash, alb["name"])
+
+        if prev_hash == new_hash:
+            print("    Gruppe unveraendert - stelle nur Libraries sicher.")
+            libraries = ensure_group_libraries(args, users, members, new_hash,
+                                               libraries)
+            continue
+
+        os.makedirs(target_host_dir, exist_ok=True)
+
+        if prev_hash is None:
+            # Erst-Externalisierung: interne Album-Assets in den Ordner kopieren.
+            assets = search_all(args.url, alb["key"], {"albumIds": [alb["id"]]})
+            internal = [a for a in assets if not a.get("libraryId")]
+            print(f"    Erst-Externalisierung: {len(internal)}/{len(assets)} "
+                  f"interne Assets -> {new_hash}/{alb['name']}/")
+            for a in internal:
+                fname = f"{a['id']}_{a.get('originalFileName')}"
+                with open(os.path.join(target_host_dir, fname), "wb") as fh:
+                    fh.write(download_original(args.url, alb["key"], a["id"]))
+                pending.append({"key": alb["key"], "upload_id": a["id"],
+                                "filename": fname, "library_id": None,
+                                "owner_id": alb["owner_id"], "group_hash": new_hash})
+        else:
+            # Gruppe gewachsen: Album-Ordner in den groesseren Permutationsordner
+            # verschieben (alten leeren Ordner bewusst stehen lassen).
+            old_host_dir = os.path.join(host_root, prev_hash, alb["name"])
+            print(f"    Umzug {prev_hash} -> {new_hash}")
+            if os.path.isdir(old_host_dir):
+                for entry in os.listdir(old_host_dir):
+                    shutil.move(os.path.join(old_host_dir, entry),
+                                os.path.join(target_host_dir, entry))
+            else:
+                print(f"      WARNUNG: alter Ordner {old_host_dir} fehlt - "
+                      f"nichts zu verschieben.")
+
+        libraries = ensure_group_libraries(args, users, members, new_hash,
+                                           libraries)
+        manifest["albums"][alb["id"]] = {
+            "name": alb["name"], "owner": alb["owner_id"],
+            "members": members, "hash": new_hash}
+        manifest["groups"][new_hash] = {"members": members}
+
+    save_manifest(host_root, manifest)
+
+    # Fuer die zu loeschenden Originale die Owner-Library der Gruppe nachtragen,
+    # damit scan_and_wait den erfolgreichen Import bestaetigen kann.
+    owner_lib = {(lib["ownerId"], ip.rstrip("/")): lib["id"]
+                 for lib in libraries for ip in (lib.get("importPaths") or [])}
+    for p in pending:
+        container = f"{EXTERNAL_ROOT.rstrip('/')}/{p['group_hash']}"
+        p["library_id"] = owner_lib.get((p["owner_id"], container.rstrip("/")))
+    dropped = [p for p in pending if not p["library_id"]]
+    if dropped:
+        print(f"  WARNUNG: {len(dropped)} Originale ohne Owner-Library - werden "
+              f"nicht geloescht (Import nicht bestaetigbar).")
+    return [p for p in pending if p["library_id"]]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="External-Library-Unterordner <-> gleichnamige Alben synchronisieren.")
-    parser.add_argument("--url", default=IMMICH_URL,
-                        help="Basis-URL der Immich-Instanz (Standard: oben im Script)")
-    parser.add_argument("--admin-key", default=ADMIN_API_KEY,
-                        help="Admin-API-Key (Standard: oben im Script)")
+    parser.add_argument("--config", default=DEFAULT_CONFIG,
+                        help="Pfad zur YAML-Config (Standard: config.yaml neben dem Script)")
+    parser.add_argument("--url",
+                        help="Basis-URL der Immich-Instanz (ueberschreibt die Config)")
+    parser.add_argument("--admin-key",
+                        help="Admin-API-Key (ueberschreibt die Config)")
     parser.add_argument("--library",
                         help="Nur diese Library (exakter Name) verarbeiten.")
     args = parser.parse_args()
 
-    if not args.url or args.admin_key in ("", "DEIN_API_KEY_HIER"):
-        parser.error("Bitte IMMICH_URL und ADMIN_API_KEY oben im Script eintragen "
-                     "(oder --url / --admin-key angeben).")
+    load_config(args.config)
+    args.url = args.url or IMMICH_URL
+    args.admin_key = args.admin_key or ADMIN_API_KEY
+
+    if not args.url or args.url == "DOMAIN":
+        parser.error(f"Keine Immich-URL gesetzt. Trage 'immich_url' in {args.config} "
+                     f"ein (oder nutze --url).")
+    if not args.admin_key or args.admin_key == "APIKEY":
+        parser.error(f"Kein Admin-API-Key gesetzt. Trage 'admin_api_key' in {args.config} "
+                     f"ein (oder nutze --admin-key).")
 
     users = get_users(args.url, args.admin_key)
     owner_keys = resolve_owner_keys(args.url, args.admin_key, users)
-    libraries = get_external_libraries(args.url, args.admin_key)
 
+    # Ablauf in Phasen (Details siehe README.md), damit auch geteilte Ordner,
+    # manuell abgelegte Dateien und Loeschungen fuer ALLE Nutzer korrekt wirken.
+    #
+    # Phase S laeuft zuerst: sie legt Permutationsordner + Libraries an und
+    # verschiebt geteilte Album-Bilder dorthin (kann also auf einer frischen
+    # Instanz die ersten Libraries ueberhaupt erzeugen). Bei einem gezielten
+    # --library-Lauf wird Phase S uebersprungen.
+    share_pending: list[dict] = []
+    if EXTERNAL_ROOT and not args.library:
+        print("=== Phase S: geteilte Alben -> External ===")
+        share_pending = sync_shared_albums(args, users, owner_keys)
+
+    libraries = get_external_libraries(args.url, args.admin_key)
     if args.library:
         libraries = [l for l in libraries if l.get("name") == args.library]
         if not libraries:
@@ -523,18 +786,11 @@ def main() -> None:
     if not libraries:
         sys.exit("Keine External Libraries gefunden.")
 
-    # Ablauf in Phasen, damit auch geteilte Ordner, manuell abgelegte Dateien
-    # und Loeschungen fuer ALLE Nutzer korrekt wirken:
-    #   0. geloeschte (getrashte) Album-Bilder ueberall entfernen (Datei + Assets)
-    #   1. ergaenzte Uploads aus den Alben in die passenden Unterordner kopieren
-    #   2. ALLE Libraries scannen und auf den Import warten
-    #   3. alle Library-Assets in die (ggf. neu angelegten) Unterordner-Alben aufnehmen
-    #   4. die erfolgreich importierten Uploads endgueltig loeschen
-    print("=== Phase 0: geloeschte Album-Bilder ueberall entfernen ===")
+    print("\n=== Phase 0: geloeschte Album-Bilder ueberall entfernen ===")
     propagate_deletions(args, users, owner_keys, libraries)
 
     print("\n=== Phase 1: ergaenzte Uploads -> Library-Ordner ===")
-    pending = collect_uploads(args, users, owner_keys, libraries)
+    pending = share_pending + collect_uploads(args, users, owner_keys, libraries)
 
     print("\n=== Phase 2: Libraries scannen & auf Import warten ===")
     imported = scan_and_wait(args, owner_keys, libraries, pending)

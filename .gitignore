@@ -1,0 +1,5 @@
+# Enthaelt Secrets (URL + API-Keys) - nicht einchecken.
+config.yaml
+
+__pycache__/
+*.pyc
