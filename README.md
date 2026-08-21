@@ -115,16 +115,20 @@ eigene Kopie derselben Dateien.
 
 ### Ablauf
 
-Alice teilt „Sommer 2026" mit Bob und Carol ⇒ Gruppe `{Alice, Bob, Carol}`:
+Alice teilt „Sommer 2026" (Album-ID `abc123…`) mit Bob und Carol ⇒ Gruppe
+`{Alice, Bob, Carol}`:
 
-1. Die Bilder werden nach `external/<hash der Gruppe>/Sommer 2026/` **verschoben**
-   (Originale von Alice werden nach dem Import endgueltig geloescht).
+1. Die Bilder werden nach `external/<hash der Gruppe>/<album-id>/` **verschoben**
+   (Originale von Alice werden nach dem Import endgueltig geloescht). Der
+   Unterordner heisst nach der **Album-ID**, nicht dem Namen – so kollidieren
+   zwei gleichnamige Alben derselben Gruppe nicht.
 2. Jedes Gruppenmitglied bekommt eine External Library auf `external/<hash>/`.
 3. Die **native Immich-Freigabe wird aufgeloest** (Modell B) – sonst saehen die
-   anderen das Album doppelt (als Gast **und** als eigene External-Kopie), und es
-   entstuenden Namens-Kollisionen. Die Freigabe war nur der Ausloeser.
-4. Die normale Ordner→Album-Engine (Phase 3) legt fuer **jeden** ein eigenes,
-   ihm gehoerendes Album „Sommer 2026" an.
+   anderen das Album doppelt (als Gast **und** als eigene External-Kopie). Die
+   Freigabe war nur der Ausloeser.
+4. Die **Share-Engine** (Phase 3) legt fuer **jeden** ein eigenes, ihm
+   gehoerendes Album mit dem **Anzeigenamen aus dem Manifest** an (verwaltet ueber
+   die Album-ID je Mitglied, nicht ueber den Namen).
 
 ### Mitgliedschaft ist append-only
 
@@ -132,12 +136,16 @@ Es kann nur jemand **dazukommen**, nie entfernt werden. Da die native Freigabe
 nach dem Verarbeiten aufgeloest wird, fuegt man weitere Leute hinzu, indem man
 das (jetzt external-basierte) Album **erneut kurz teilt** – der naechste Lauf
 erkennt die groessere Gruppe. Waechst sie (`{A,B}` → `{A,B,C}`), zieht der
-Album-Ordner in den groesseren Permutations-Ordner um; das neue Mitglied bekommt
-seine Library, die anderen ziehen mit. **Permutations-Ordner (`external/<hash>/`)
-und Libraries werden nie geloescht** (auch leer nicht) und bei exakt gleicher
-Gruppe wiederverwendet. Leere **Album-Unterordner** darin werden dagegen entfernt
-(Phase 6) – etwa der zurueckbleibende Ordner nach einem Umzug oder wenn alle
-Bilder eines Albums geloescht wurden.
+Album-Ordner (`<album-id>/`) in den groesseren Permutations-Ordner um; das neue
+Mitglied bekommt seine Library, die anderen ziehen mit. **Permutations-Ordner
+(`external/<hash>/`) und Libraries werden nie geloescht** (auch leer nicht) und
+bei exakt gleicher Gruppe wiederverwendet. Leere **Album-Unterordner** darin
+werden dagegen entfernt (Phase 6) – etwa der zurueckbleibende Ordner nach einem
+Umzug oder wenn alle Bilder eines Albums geloescht wurden.
+
+Zwei **verschiedene** Alben mit gleichem Namen und gleicher Gruppe bleiben
+getrennt (eigene Album-ID = eigener Unterordner) – jedes Mitglied hat sie dann
+als zwei gleichnamige Alben.
 
 Neue **Bilder** (statt Nutzer) fuegt jeder einfach seinem eigenen External-Album
 hinzu; Phase 1 kopiert sie in den gemeinsamen Ordner, sodass sie bei allen
@@ -154,12 +162,14 @@ noetig ist.
 
 Benennt **irgendein** Mitglied sein Album um, zieht das Script das nach: Das
 Manifest trackt pro geteiltem Album die Album-ID **jedes** Mitglieds
-(`member_albums`, gefuellt nach Phase 3). Beim naechsten Lauf vergleicht
-`reconcile_album_renames` die aktuellen Namen aller dieser Alben mit dem
-Ordnernamen; weicht einer ab, gilt er als neuer Name → der Disk-Ordner wird
-umbenannt und **alle** Mitglieder-Alben werden per `PATCH` auf den neuen Namen
-gesetzt. Benennen zwei Mitglieder gleichzeitig unterschiedlich um, gewinnt
-deterministisch der alphabetisch erste Name (mit Warnung).
+(`member_albums`) sowie den Anzeigenamen. Beim naechsten Lauf vergleicht
+`reconcile_album_renames` die aktuellen Namen aller Mitglieder-Alben mit dem
+Manifest-Namen; weicht einer ab, gilt er als neuer Name → **alle**
+Mitglieder-Alben werden per `PATCH` darauf gesetzt und der Manifest-Name
+aktualisiert. Weil der Ordner nach der Album-ID heisst, muss dabei **kein Ordner
+umbenannt** werden (kein Rescan-Rappeln). Benennen zwei Mitglieder gleichzeitig
+unterschiedlich um, gewinnt deterministisch der alphabetisch erste Name (mit
+Warnung).
 
 Umbenennung schlaegt also erst beim **naechsten Lauf** in den anderen Konten
 durch (nicht sofort).
@@ -169,9 +179,10 @@ durch (nicht sofort).
 - Die native Freigabe wird nach dem Externalisieren **entfernt** – der
   urspruenglich geteilte Nutzer verliert also die Gast-Ansicht und hat
   stattdessen sein eigenes, ihm gehoerendes External-Album.
-- Beim Gruppen-Umzug bleiben die alten (nun leeren) Ordner und die zugehoerigen
-  Alben der bisherigen Mitglieder bestehen; Immich verschiebt die verwaisten
-  Assets beim Rescan in den Papierkorb.
+- Beim **Gruppen-Umzug** (nicht beim Umbenennen) wandern die Dateien physisch in
+  einen neuen Ordner; Immich vergibt neue Asset-IDs (alter Pfad → Papierkorb,
+  neuer → Neuimport). Der leere alte Album-Unterordner wird in Phase 6 entfernt,
+  der Permutations-Ordner bleibt.
 - Nur Alben von Nutzern mit hinterlegtem API-Key (`user_api_keys` bzw. Admin)
   werden erfasst.
 - Ein gezielter `--library`-Lauf ueberspringt Phase S.
