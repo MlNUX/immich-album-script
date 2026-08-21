@@ -605,17 +605,27 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
     seen: set[str] = set()
     result: list[dict] = []
     for owner_id, key in owner_keys.items():
-        for album in api_request(args.url, "/api/albums", key) or []:
-            if album["id"] in seen or album.get("ownerId") != owner_id:
+        albums = api_request(args.url, "/api/albums", key) or []
+        owned = [a for a in albums if a.get("ownerId") == owner_id]
+        shared_here = 0
+        for album in owned:
+            if album["id"] in seen:
                 continue
-            if album.get("shared") and not album.get("albumUsers"):
-                album = api_request(args.url, f"/api/albums/{album['id']}", key)
+            # Die Listen-Ansicht liefert albumUsers je nach Version nicht mit,
+            # daher das Detail laden, sobald die Freigabe-Info fehlt.
+            if not album.get("albumUsers"):
+                detail = api_request(args.url, f"/api/albums/{album['id']}", key)
+                if detail:
+                    album = detail
             members = album_members(album)
             if len(members) < 2:
                 continue  # nicht geteilt -> nicht Teil einer Gruppe
+            shared_here += 1
             seen.add(album["id"])
             result.append({"id": album["id"], "name": album.get("albumName"),
                            "owner_id": owner_id, "key": key, "members": members})
+        print(f"  {user_label(users, owner_id)}: {len(owned)} eigene Alben, "
+              f"{shared_here} geteilt")
     return result
 
 
