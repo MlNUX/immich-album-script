@@ -836,13 +836,13 @@ def reconcile_album_renames(args, owner_keys, manifest) -> None:
               f"Manifest entfernt.")
 
 
-def sync_shared_albums(args, users, owner_keys, manifest, host_root) -> list[dict]:
+def sync_shared_albums(args, users, owner_keys, manifest, host_root) -> None:
     """Phase S: geteilte Alben externalisieren bzw. in groessere Gruppe umziehen.
 
     Der Disk-Unterordner heisst nach der Quell-Album-ID (eindeutig), damit zwei
     gleichnamige Alben derselben Gruppe NICHT im selben Ordner landen. Der
-    Anzeigename steht im Manifest. Liefert offene Original-Loeschungen im Format
-    von collect_uploads ({key, upload_id, filename, library_id}).
+    Anzeigename steht im Manifest. Legt Ordner/Libraries an und pflegt das
+    Manifest; das Kopieren der Bilder uebernimmt Phase 1 (share_collect_uploads).
     """
     # Umbenennungen zuerst nachziehen (auch fuer bereits unshared Alben).
     reconcile_album_renames(args, owner_keys, manifest)
@@ -850,10 +850,9 @@ def sync_shared_albums(args, users, owner_keys, manifest, host_root) -> list[dic
     albums = collect_shared_albums(args, users, owner_keys)
     if not albums:
         print("  keine geteilten Alben gefunden.")
-        return []
+        return
 
     libraries = get_external_libraries(args.url, args.admin_key)
-    pending: list[dict] = []
 
     for alb in albums:
         members = alb["members"]
@@ -878,18 +877,11 @@ def sync_shared_albums(args, users, owner_keys, manifest, host_root) -> list[dic
         os.makedirs(target_host_dir, exist_ok=True)
 
         if prev_hash is None:
-            # Erst-Externalisierung: interne Album-Assets in den Ordner kopieren.
-            assets = search_all(args.url, alb["key"], {"albumIds": [source_id]})
-            internal = [a for a in assets if not a.get("libraryId")]
-            print(f"    Erst-Externalisierung: {len(internal)}/{len(assets)} "
-                  f"interne Assets -> {new_hash}/{source_id}/")
-            for a in internal:
-                fname = f"{a['id']}_{a.get('originalFileName')}"
-                with open(os.path.join(target_host_dir, fname), "wb") as fh:
-                    fh.write(download_original(args.url, alb["key"], a["id"]))
-                pending.append({"key": alb["key"], "upload_id": a["id"],
-                                "filename": fname, "library_id": None,
-                                "owner_id": alb["owner_id"], "group_hash": new_hash})
+            # Erst-Externalisierung: Ordner ist angelegt; die internen
+            # Original-Bilder kopiert Phase 1 (share_collect_uploads) - so gibt es
+            # nur EINEN Kopierpfad und keine doppelten Kopien/Loeschungen.
+            print(f"    Erst-Externalisierung vorbereitet -> {new_hash}/{source_id}/ "
+                  f"(Bilder kopiert Phase 1)")
         else:
             # Gruppe gewachsen: Album-Ordner in den groesseren Permutationsordner
             # verschieben. Der alte, nun leere Album-Unterordner wird in Phase 6
@@ -914,19 +906,6 @@ def sync_shared_albums(args, users, owner_keys, manifest, host_root) -> list[dic
         entry.setdefault("member_albums", {})[alb["owner_id"]] = source_id
         manifest["groups"][new_hash] = {"members": members}
         unshare_album(args, alb)
-
-    # Fuer die zu loeschenden Originale die Owner-Library der Gruppe nachtragen,
-    # damit scan_and_wait den erfolgreichen Import bestaetigen kann.
-    owner_lib = {(lib["ownerId"], ip.rstrip("/")): lib["id"]
-                 for lib in libraries for ip in (lib.get("importPaths") or [])}
-    for p in pending:
-        container = f"{EXTERNAL_ROOT.rstrip('/')}/{p['group_hash']}"
-        p["library_id"] = owner_lib.get((p["owner_id"], container.rstrip("/")))
-    dropped = [p for p in pending if not p["library_id"]]
-    if dropped:
-        print(f"  WARNUNG: {len(dropped)} Originale ohne Owner-Library - werden "
-              f"nicht geloescht (Import nicht bestaetigbar).")
-    return [p for p in pending if p["library_id"]]
 
 
 def share_container_paths(manifest) -> set[str]:
@@ -1066,14 +1045,13 @@ def main() -> None:
     share_active = bool(host_root) and not args.library
     manifest = load_manifest(host_root) if host_root else {"albums": {}, "groups": {}}
 
-    # Phase S laeuft zuerst: legt Permutationsordner + Libraries an und verschiebt
-    # geteilte Album-Bilder dorthin (kann auf einer frischen Instanz die ersten
-    # Libraries ueberhaupt erzeugen).
-    share_pending: list[dict] = []
+    # Phase S laeuft zuerst: legt Permutationsordner + Libraries an, verschiebt
+    # bei Gruppenwechsel die Ordner und traegt alles ins Manifest ein (kann auf
+    # einer frischen Instanz die ersten Libraries ueberhaupt erzeugen). Das
+    # Kopieren der Bilder erledigt Phase 1.
     if share_active:
         print("=== Phase S: geteilte Alben -> External ===")
-        share_pending = sync_shared_albums(args, users, owner_keys, manifest,
-                                           host_root)
+        sync_shared_albums(args, users, owner_keys, manifest, host_root)
 
     libraries = get_external_libraries(args.url, args.admin_key)
     if args.library:
@@ -1099,7 +1077,7 @@ def main() -> None:
     propagate_deletions(args, users, owner_keys, libraries)
 
     print("\n=== Phase 1: ergaenzte Uploads -> Library-Ordner ===")
-    pending = share_pending + collect_uploads(args, users, owner_keys, plain_libs)
+    pending = collect_uploads(args, users, owner_keys, plain_libs)
     if share_active:
         pending += share_collect_uploads(args, users, owner_keys, share_libs,
                                          manifest)
