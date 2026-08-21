@@ -678,13 +678,16 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
                 continue  # nicht geteilt -> nicht Teil einer Gruppe
             name = (album.get("albumName") or "").strip()
             if not name:
-                # Ohne Namen gaebe es keinen Ordnernamen -> Bilder wuerden ohne
-                # Album externalisiert (und Originale geloescht). Lieber skippen,
-                # bis der Nutzer das Album benennt (nicht in 'seen' -> spaeter
-                # erneut geprueft).
-                print(f"      WARNUNG: geteiltes Album {album['id']} hat keinen "
-                      f"Namen - uebersprungen. Bitte im Immich-UI benennen.")
-                continue
+                # Ohne Namen gaebe es keinen Ordnernamen. Statt zu ueberspringen
+                # einen eindeutigen Default vergeben (Album-ID-Praefix, damit zwei
+                # namenlose Alben nicht kollidieren) und das Album in Immich gleich
+                # umbenennen, damit es ueberall konsistent heisst.
+                name = f"Album-{album['id'][:8]}"
+                print(f"      Hinweis: geteiltes Album {album['id']} ohne Namen "
+                      f"-> Default '{name}'")
+                api_request(args.url, f"/api/albums/{album['id']}", key,
+                            method="PATCH", body={"albumName": name},
+                            tolerant=True)
             shared_here += 1
             seen.add(album["id"])
             result.append({"id": album["id"], "name": name,
