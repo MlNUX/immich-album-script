@@ -146,12 +146,17 @@ noetig ist.
 
 ### Umbenennen
 
-Der **Ordnername ist die Wahrheit**, nicht der Albumname. Benennt der **Owner**
-sein (getracktes) Album um, zieht das Script den Disk-Ordner mit um; beim selben
-Lauf legen die Mitglieder-Libraries die neu benannten Alben an, die alten (nun
-leeren) entfernt Phase 5. Nur der Owner-Rename zaehlt (nur sein Album steht im
-Manifest). Benennt ein **Nicht-Owner** seine Kopie um, wird beim naechsten Lauf
-wieder ein Album mit dem Ordnernamen angelegt – die Umbenennung haelt also nicht.
+Benennt **irgendein** Mitglied sein Album um, zieht das Script das nach: Das
+Manifest trackt pro geteiltem Album die Album-ID **jedes** Mitglieds
+(`member_albums`, gefuellt nach Phase 3). Beim naechsten Lauf vergleicht
+`reconcile_album_renames` die aktuellen Namen aller dieser Alben mit dem
+Ordnernamen; weicht einer ab, gilt er als neuer Name → der Disk-Ordner wird
+umbenannt und **alle** Mitglieder-Alben werden per `PATCH` auf den neuen Namen
+gesetzt. Benennen zwei Mitglieder gleichzeitig unterschiedlich um, gewinnt
+deterministisch der alphabetisch erste Name (mit Warnung).
+
+Umbenennung schlaegt also erst beim **naechsten Lauf** in den anderen Konten
+durch (nicht sofort).
 
 ### Bekannte Eigenheiten
 

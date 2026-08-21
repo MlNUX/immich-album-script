@@ -751,48 +751,102 @@ def unshare_album(args, alb) -> None:
               f"seine eigene External-Kopie.")
 
 
-def reconcile_album_renames(args, owner_keys, manifest, host_root) -> None:
-    """Zieht Owner-Umbenennungen nach (Modell A).
+def record_member_albums(args, owner_keys) -> None:
+    """Merkt sich pro geteiltem Album die Album-ID JEDES Mitglieds.
 
-    Heisst das getrackte Quell-Album jetzt anders als im Manifest, wird der
-    Disk-Ordner mitbenannt und der Manifest-Name aktualisiert. Da alle Libraries
-    auf den Gruppenordner zeigen, sehen die Mitglieder danach den neuen
-    Unterordner-Namen und run_forward legt die (neu benannten) Alben an; die alten
-    (nun leeren) Alben entfernt Phase 5. Nur der Owner-Rename zaehlt - nur sein
-    Album ist im Manifest hinterlegt.
+    Laeuft nach Phase 3 (dann existieren alle Mitglieder-Alben). Ist die ID eines
+    Mitglieds schon bekannt, wird sie nur verifiziert (bleibt so ueber
+    Umbenennungen hinweg stabil); sonst per Ordnername nachgeschlagen. Diese IDs
+    braucht reconcile_album_renames, um eine Umbenennung in JEDEM Konto zu
+    erkennen.
+    """
+    host_root = map_to_host_path(EXTERNAL_ROOT)
+    if host_root is None:
+        return
+    manifest = load_manifest(host_root)
+    for info in manifest["albums"].values():
+        foldername = info.get("name")
+        member_albums = info.setdefault("member_albums", {})
+        for uid in info.get("members", []):
+            key = owner_keys.get(uid)
+            if not key:
+                continue
+            known = member_albums.get(uid)
+            if known and api_request(args.url, f"/api/albums/{known}", key,
+                                     tolerant=True, quiet=True):
+                continue  # ID noch gueltig -> beibehalten (rename-stabil)
+            album = get_albums_by_name(args.url, key).get(foldername)
+            if album:
+                member_albums[uid] = album["id"]
+    save_manifest(host_root, manifest)
+
+
+def reconcile_album_renames(args, owner_keys, manifest, host_root) -> None:
+    """Zieht Umbenennungen aus JEDEM Konto nach (Modell A).
+
+    Heisst irgendein Mitglieder-Album jetzt anders als der Ordner, gilt das als
+    neuer Name: der Disk-Ordner wird mitbenannt und ALLE Mitglieder-Alben per
+    PATCH auf den neuen Namen gesetzt. Getrackte Alben, die es nicht mehr gibt,
+    werden aus dem Manifest entfernt.
     """
     stale: list[str] = []
-    for album_id, info in manifest["albums"].items():
-        key = owner_keys.get(info.get("owner"))
-        if not key:
-            continue
-        album = api_request(args.url, f"/api/albums/{album_id}", key,
-                            tolerant=True, quiet=True)
-        if not album:
-            # Album existiert nicht mehr (vom Owner geloescht) -> Eintrag
-            # entfernen, damit er nicht bei jedem Lauf erneut Fehler wirft.
-            stale.append(album_id)
-            continue
-        current = (album.get("albumName") or "").strip()
+    for source_id, info in manifest["albums"].items():
         old = info.get("name")
-        if not current or current == old:
-            continue
         ghash = info.get("hash")
+        member_albums = info.get("member_albums") or {source_id: source_id}
+
+        # Aktuelle Namen aller getrackten Mitglieder-Alben einsammeln.
+        current: dict[str, str] = {}  # album_id -> aktueller Name
+        for uid, aid in member_albums.items():
+            key = owner_keys.get(uid)
+            if not key:
+                continue
+            album = api_request(args.url, f"/api/albums/{aid}", key,
+                                tolerant=True, quiet=True)
+            if album:
+                current[aid] = (album.get("albumName") or "").strip()
+        # Quell-Album zusaetzlich pruefen (Stale-Erkennung, falls ungetrackt).
+        if source_id not in current:
+            key = owner_keys.get(info.get("owner"))
+            album = api_request(args.url, f"/api/albums/{source_id}", key,
+                                tolerant=True, quiet=True) if key else None
+            if key and not album and not current:
+                stale.append(source_id)
+                continue
+            if album:
+                current[source_id] = (album.get("albumName") or "").strip()
+
+        changed = sorted({n for n in current.values() if n and n != old})
+        if not changed:
+            continue
+        new = changed[0]
+        if len(changed) > 1:
+            print(f"  WARNUNG: mehrere neue Namen fuer '{old}' {changed} - "
+                  f"nehme '{new}'.")
+
         old_dir = os.path.join(host_root, ghash, old)
-        new_dir = os.path.join(host_root, ghash, current)
+        new_dir = os.path.join(host_root, ghash, new)
         if os.path.isdir(old_dir):
             if os.path.exists(new_dir):
-                print(f"  WARNUNG: Umbenennung '{old}' -> '{current}' "
-                      f"uebersprungen - Zielordner existiert schon.")
+                print(f"  WARNUNG: Umbenennung '{old}' -> '{new}' uebersprungen "
+                      f"- Zielordner existiert schon.")
                 continue
             shutil.move(old_dir, new_dir)
-        info["name"] = current
-        print(f"  Album umbenannt: '{old}' -> '{current}' ({ghash}) - "
-              f"Mitglieder-Alben ziehen nach.")
 
-    for album_id in stale:
-        manifest["albums"].pop(album_id, None)
-        print(f"  getracktes Album {album_id} nicht mehr vorhanden - aus "
+        # Alle Mitglieder-Alben auf den neuen Namen setzen (die, die noch anders
+        # heissen).
+        for uid, aid in member_albums.items():
+            key = owner_keys.get(uid)
+            if key and current.get(aid) not in (new, None):
+                api_request(args.url, f"/api/albums/{aid}", key, method="PATCH",
+                            body={"albumName": new}, tolerant=True)
+        info["name"] = new
+        print(f"  Album umbenannt: '{old}' -> '{new}' ({ghash}) - alle "
+              f"Mitglieder-Alben angepasst.")
+
+    for source_id in stale:
+        manifest["albums"].pop(source_id, None)
+        print(f"  getracktes Album {source_id} nicht mehr vorhanden - aus "
               f"Manifest entfernt.")
 
 
@@ -871,9 +925,12 @@ def sync_shared_albums(args, users, owner_keys) -> list[dict]:
 
         libraries = ensure_group_libraries(args, users, members, new_hash,
                                            libraries)
-        manifest["albums"][alb["id"]] = {
-            "name": alb["name"], "owner": alb["owner_id"],
-            "members": members, "hash": new_hash}
+        entry = manifest["albums"].setdefault(alb["id"], {})
+        entry.update({"name": alb["name"], "owner": alb["owner_id"],
+                      "members": members, "hash": new_hash})
+        # Album-IDs je Mitglied fuer die Rename-Erkennung; Owner kennt man sofort
+        # (sein Quell-Album), die anderen traegt record_member_albums nach.
+        entry.setdefault("member_albums", {})[alb["owner_id"]] = alb["id"]
         manifest["groups"][new_hash] = {"members": members}
         unshare_album(args, alb)
 
@@ -962,6 +1019,11 @@ def main() -> None:
 
     print("\n=== Phase 5: leergeraeumte Alben entfernen ===")
     delete_emptied_albums(args, users, owner_keys, album_counts_before)
+
+    # Album-IDs je Mitglied festhalten, damit reconcile beim naechsten Lauf eine
+    # Umbenennung in jedem Konto erkennt.
+    if EXTERNAL_ROOT and not args.library:
+        record_member_albums(args, owner_keys)
 
 
 if __name__ == "__main__":
