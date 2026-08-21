@@ -624,8 +624,14 @@ def collect_shared_albums(args, users, owner_keys) -> list[dict]:
             seen.add(album["id"])
             result.append({"id": album["id"], "name": album.get("albumName"),
                            "owner_id": owner_id, "key": key, "members": members})
-        print(f"  {user_label(users, owner_id)}: {len(owned)} eigene Alben, "
-              f"{shared_here} geteilt")
+        print(f"  {user_label(users, owner_id)}: {len(albums)} sichtbar, "
+              f"{len(owned)} eigene, {shared_here} davon geteilt")
+        # Nur mit-geteilte (fremde) Alben nennen - so sieht man, wessen Key noch
+        # fehlt, um sie verarbeiten zu koennen.
+        for a in albums:
+            if a.get("ownerId") != owner_id:
+                print(f"      (fremd) '{a.get('albumName')}' gehoert "
+                      f"{user_label(users, a.get('ownerId'))} - Key fehlt")
     return result
 
 
