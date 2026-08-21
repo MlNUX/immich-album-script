@@ -98,9 +98,9 @@ S. **Share-Sync** *(nur wenn `external_root` gesetzt und kein `--library`)* –
 5. **Leere Alben entfernen** – Alben, die durch die Loeschphasen von >0 auf 0
    Bilder gefallen sind (also vom Script leergeraeumt wurden), werden geloescht.
    Bereits vorher leere Alben bleiben unangetastet.
-6. **Leere Album-Ordner entfernen** – leere Album-Unterordner in den
-   Permutations-Ordnern werden geloescht; die Permutations-Ordner selbst bleiben.
-   (Nur bei aktivem Share-Sync.)
+6. **Ungenutzte Dateien aufraeumen** – in den Permutations-Ordnern werden
+   Dateien geloescht, die von keinem Album mehr referenziert werden; die
+   Permutations-Ordner selbst bleiben. (Nur bei aktivem Share-Sync.)
 
 ## Share-Sync (Phase S)
 
@@ -115,37 +115,39 @@ eigene Kopie derselben Dateien.
 
 ### Ablauf
 
-Alice teilt „Sommer 2026" (Album-ID `abc123…`) mit Bob und Carol ⇒ Gruppe
-`{Alice, Bob, Carol}`:
+Alice teilt „Sommer 2026" mit Bob und Carol ⇒ Gruppe `{Alice, Bob, Carol}`:
 
-1. Die Bilder werden nach `external/<hash der Gruppe>/<album-id>/` **verschoben**
-   (Originale von Alice werden nach dem Import endgueltig geloescht). Der
-   Unterordner heisst nach der **Album-ID**, nicht dem Namen – so kollidieren
-   zwei gleichnamige Alben derselben Gruppe nicht.
-2. Jedes Gruppenmitglied bekommt eine External Library auf `external/<hash>/`.
+1. Die Bilder werden **inhalts-dedupliziert** flach nach `external/<hash der
+   Gruppe>/` kopiert – Dateiname = **Content-Hash** (`<sha1><ext>`). Jedes
+   eindeutige Bild liegt so nur **einmal** pro Ordner, egal in wie vielen Alben es
+   ist. Originale werden nach dem Import endgueltig geloescht.
+2. Jedes Gruppenmitglied bekommt eine External Library auf `external/<hash>/` und
+   importiert jede Datei genau **einmal** → keine Timeline-Duplikate.
 3. Die **native Immich-Freigabe wird aufgeloest** (Modell B) – sonst saehen die
    anderen das Album doppelt (als Gast **und** als eigene External-Kopie). Die
    Freigabe war nur der Ausloeser.
-4. Die **Share-Engine** (Phase 3) legt fuer **jeden** ein eigenes, ihm
-   gehoerendes Album mit dem **Anzeigenamen aus dem Manifest** an (verwaltet ueber
-   die Album-ID je Mitglied, nicht ueber den Namen).
+4. Die **Share-Engine** (Phase 3) baut fuer **jeden** sein eigenes, ihm
+   gehoerendes Album aus dem Manifest auf: die Zugehoerigkeit „welches Album
+   enthaelt welches Bild" steht als Content-Dateinamen in `assets`, die
+   importierten Assets werden per Dateiname zugeordnet. Ein dedupliziertes Bild
+   landet so in **allen** Alben, die es enthalten, ohne Duplikat.
 
 ### Mitgliedschaft ist append-only
 
 Es kann nur jemand **dazukommen**, nie entfernt werden. Da die native Freigabe
 nach dem Verarbeiten aufgeloest wird, fuegt man weitere Leute hinzu, indem man
 das (jetzt external-basierte) Album **erneut kurz teilt** – der naechste Lauf
-erkennt die groessere Gruppe. Waechst sie (`{A,B}` → `{A,B,C}`), zieht der
-Album-Ordner (`<album-id>/`) in den groesseren Permutations-Ordner um; das neue
-Mitglied bekommt seine Library, die anderen ziehen mit. **Permutations-Ordner
-(`external/<hash>/`) und Libraries werden nie geloescht** (auch leer nicht) und
-bei exakt gleicher Gruppe wiederverwendet. Leere **Album-Unterordner** darin
-werden dagegen entfernt (Phase 6) – etwa der zurueckbleibende Ordner nach einem
-Umzug oder wenn alle Bilder eines Albums geloescht wurden.
+erkennt die groessere Gruppe. Waechst sie (`{A,B}` → `{A,B,C}`), werden die
+Dateien des Albums in den groesseren Permutations-Ordner **kopiert** und das neue
+Mitglied bekommt seine Library. **Permutations-Ordner (`external/<hash>/`) und
+Libraries werden nie geloescht** (auch leer nicht) und bei exakt gleicher Gruppe
+wiederverwendet. **Ungenutzte Dateien** (von keinem Album mehr referenziert)
+werden in Phase 6 aufgeraeumt.
 
 Zwei **verschiedene** Alben mit gleichem Namen und gleicher Gruppe bleiben
-getrennt (eigene Album-ID = eigener Unterordner) – jedes Mitglied hat sie dann
-als zwei gleichnamige Alben.
+getrennt (getrennte Manifest-Eintraege je Quell-Album-ID) – jedes Mitglied hat
+sie dann als zwei gleichnamige Alben. Enthalten sie dasselbe Bild, teilen sie
+sich dank Dedup **eine** Datei/ein Asset (kein Timeline-Duplikat).
 
 Neue **Bilder** (statt Nutzer) fuegt jeder einfach seinem eigenen External-Album
 hinzu; Phase 1 kopiert sie in den gemeinsamen Ordner, sodass sie bei allen
@@ -153,10 +155,13 @@ Mitgliedern ankommen – dafuer ist kein erneutes Teilen noetig.
 
 ### Zustand / Manifest
 
-Der Zustand liegt als JSON in `external/.immich_groups.json` (welches Album zu
-welcher Gruppe/welchem Ordner gehoert). Daran erkennt das Script bei jedem Lauf,
-ob eine Gruppe gewachsen ist. JSON statt YAML, damit keine Zusatz-Abhaengigkeit
-noetig ist.
+Der Zustand liegt als JSON in `external/.immich_groups.json`. Pro Quell-Album
+(stabile Immich-ID) stehen dort: `name` (Anzeigename), `owner`, `members`, `hash`
+(Permutations-Ordner), `member_albums` (Album-ID **jedes** Mitglieds) und
+`assets` (die **Content-Dateinamen**, die das Album enthaelt). Unter `groups`
+steht je Hash die Mitgliederliste. Daran erkennt das Script Aenderungen (neue
+Freigabe, gewachsene Gruppe, Umbenennung, geloeschte Bilder). JSON statt YAML,
+damit keine Zusatz-Abhaengigkeit noetig ist.
 
 ### Umbenennen
 
@@ -179,10 +184,13 @@ durch (nicht sofort).
 - Die native Freigabe wird nach dem Externalisieren **entfernt** – der
   urspruenglich geteilte Nutzer verliert also die Gast-Ansicht und hat
   stattdessen sein eigenes, ihm gehoerendes External-Album.
-- Beim **Gruppen-Umzug** (nicht beim Umbenennen) wandern die Dateien physisch in
-  einen neuen Ordner; Immich vergibt neue Asset-IDs (alter Pfad → Papierkorb,
-  neuer → Neuimport). Der leere alte Album-Unterordner wird in Phase 6 entfernt,
-  der Permutations-Ordner bleibt.
+- Beim **Gruppen-Umzug** (nicht beim Umbenennen) werden die Dateien in den neuen
+  Ordner kopiert; Immich vergibt dort neue Asset-IDs (Neuimport), die alten
+  Kopien im alten Ordner werden – wenn kein anderes Album sie mehr nutzt – in
+  Phase 6 aufgeraeumt.
+- „Einmal loeschen = ueberall weg": Da ein Bild dedupliziert **eine** Datei ist,
+  entfernt das Loeschen (Phase 0) es aus **allen** Alben derselben Gruppe, die es
+  enthalten.
 - Nur Alben von Nutzern mit hinterlegtem API-Key (`user_api_keys` bzw. Admin)
   werden erfasst.
 - Ein gezielter `--library`-Lauf ueberspringt Phase S.

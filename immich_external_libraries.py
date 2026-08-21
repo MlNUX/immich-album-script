@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -600,6 +601,29 @@ def group_hash(member_ids: list[str]) -> str:
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
 
 
+def content_filename(asset: dict, raw: bytes | None = None) -> str | None:
+    """Inhalts-basierter Dateiname '<sha1-hex><ext>' fuer die Dedup-Ablage.
+
+    Gleicher Bildinhalt -> gleicher Dateiname -> nur EINE Datei pro
+    Permutationsordner (auch wenn das Bild in mehreren Alben liegt). Der Hash
+    kommt aus Immichs 'checksum' (base64 sha1) ohne Download; fehlt er, wird er
+    aus den Bytes berechnet (dann muss raw vorliegen).
+    """
+    hexd = None
+    checksum = asset.get("checksum")
+    if checksum:
+        try:
+            hexd = base64.b64decode(checksum).hex()
+        except Exception:
+            hexd = None
+    if hexd is None and raw is not None:
+        hexd = hashlib.sha1(raw).hexdigest()
+    if hexd is None:
+        return None
+    ext = os.path.splitext(asset.get("originalFileName") or "")[1]
+    return f"{hexd}{ext}"
+
+
 def _album_user_id(u: dict) -> str | None:
     return (u.get("user") or {}).get("id") or u.get("userId")
 
@@ -751,27 +775,40 @@ def unshare_album(args, alb) -> None:
               f"seine eigene External-Kopie.")
 
 
-def remove_empty_album_folders(host_root, manifest) -> None:
-    """Loescht leere Album-Unterordner in den Permutationsordnern.
+def gc_group_files(host_root, manifest) -> None:
+    """Raeumt in den Permutationsordnern nicht mehr referenzierte Dateien weg.
 
-    Die Permutationsordner (external/<hash>/) selbst bleiben immer erhalten - nur
-    leere album-Unterordner darin werden entfernt (z.B. nach einem Gruppen-Umzug
-    oder wenn alle Bilder eines Albums geloescht wurden). Es werden ausschliesslich
-    die im Manifest bekannten Gruppen-Ordner angefasst.
+    Referenziert = in mindestens einem Album (manifest[..]['assets']) dieser
+    Gruppe. Ausserdem werden Manifest-Asset-Eintraege entfernt, deren Datei nicht
+    mehr existiert (z.B. nach 'ueberall loeschen' in Phase 0) - so heilt sich der
+    Zustand selbst. Die Permutationsordner selbst bleiben immer bestehen.
     """
+    # Datei-Referenzen pro Gruppe aus dem Manifest sammeln.
+    referenced: dict[str, set] = defaultdict(set)
+    for info in manifest["albums"].values():
+        referenced[info.get("hash")].update(info.get("assets", []))
+
+    # 1. Manifest-Assets bereinigen, deren Datei fehlt.
+    for info in manifest["albums"].values():
+        group_dir = os.path.join(host_root, info.get("hash") or "")
+        info["assets"] = [f for f in info.get("assets", [])
+                          if os.path.isfile(os.path.join(group_dir, f))]
+
+    # 2. Ungenutzte Dateien loeschen.
     removed = 0
     for ghash in manifest.get("groups", {}):
         group_dir = os.path.join(host_root, ghash)
         if not os.path.isdir(group_dir):
             continue
+        keep = referenced.get(ghash, set())
         for name in os.listdir(group_dir):
-            sub = os.path.join(group_dir, name)
-            if os.path.isdir(sub) and not os.listdir(sub):
-                os.rmdir(sub)
+            path = os.path.join(group_dir, name)
+            if os.path.isfile(path) and name not in keep:
+                os.remove(path)
                 removed += 1
-                print(f"  leerer Album-Ordner entfernt: {ghash}/{name}")
+                print(f"  ungenutzte Datei entfernt: {ghash}/{name}")
     if not removed:
-        print("  keine leeren Album-Ordner.")
+        print("  keine ungenutzten Dateien.")
 
 
 def reconcile_album_renames(args, owner_keys, manifest) -> None:
@@ -863,9 +900,9 @@ def sync_shared_albums(args, users, owner_keys, manifest, host_root) -> None:
 
         labels = ", ".join(user_label(users, m) for m in members)
         print(f"\n  Album '{alb['name']}' (Owner {user_label(users, alb['owner_id'])}), "
-              f"Gruppe [{labels}] -> {new_hash}/{source_id}")
+              f"Gruppe [{labels}] -> {new_hash}")
 
-        target_host_dir = os.path.join(host_root, new_hash, source_id)
+        new_group_dir = os.path.join(host_root, new_hash)
 
         if prev_hash == new_hash:
             print("    Gruppe unveraendert - stelle nur Libraries sicher.")
@@ -874,36 +911,37 @@ def sync_shared_albums(args, users, owner_keys, manifest, host_root) -> None:
             unshare_album(args, alb)
             continue
 
-        os.makedirs(target_host_dir, exist_ok=True)
+        os.makedirs(new_group_dir, exist_ok=True)
 
+        entry = manifest["albums"].setdefault(source_id, {})
         if prev_hash is None:
-            # Erst-Externalisierung: Ordner ist angelegt; die internen
-            # Original-Bilder kopiert Phase 1 (share_collect_uploads) - so gibt es
-            # nur EINEN Kopierpfad und keine doppelten Kopien/Loeschungen.
-            print(f"    Erst-Externalisierung vorbereitet -> {new_hash}/{source_id}/ "
+            # Erst-Externalisierung: Ordner + Libraries sind bereit; die Bilder
+            # kopiert Phase 1 (share_collect_uploads) inhalts-dedupliziert.
+            print(f"    Erst-Externalisierung vorbereitet -> {new_hash}/ "
                   f"(Bilder kopiert Phase 1)")
         else:
-            # Gruppe gewachsen: Album-Ordner in den groesseren Permutationsordner
-            # verschieben. Der alte, nun leere Album-Unterordner wird in Phase 6
-            # entfernt; der alte Permutationsordner selbst bleibt bestehen.
-            old_host_dir = os.path.join(host_root, prev_hash, source_id)
-            print(f"    Umzug {prev_hash} -> {new_hash}")
-            if os.path.isdir(old_host_dir):
-                for entry in os.listdir(old_host_dir):
-                    shutil.move(os.path.join(old_host_dir, entry),
-                                os.path.join(target_host_dir, entry))
-            else:
-                print(f"      WARNUNG: alter Ordner {old_host_dir} fehlt - "
-                      f"nichts zu verschieben.")
+            # Gruppe gewachsen: die (bereits bekannten) Dateien dieses Albums in
+            # den groesseren Permutationsordner KOPIEREN (nicht verschieben - eine
+            # Datei kann von weiteren Alben der alten Gruppe genutzt werden; die GC
+            # in Phase 6 raeumt ungenutzte alte Dateien weg).
+            old_group_dir = os.path.join(host_root, prev_hash)
+            copied = 0
+            for fname in entry.get("assets", []):
+                src = os.path.join(old_group_dir, fname)
+                dst = os.path.join(new_group_dir, fname)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+                    copied += 1
+            print(f"    Umzug {prev_hash} -> {new_hash}: {copied} Datei(en) kopiert")
 
         libraries = ensure_group_libraries(args, users, members, new_hash,
                                            libraries)
-        entry = manifest["albums"].setdefault(source_id, {})
         entry.update({"name": alb["name"], "owner": alb["owner_id"],
                       "members": members, "hash": new_hash})
-        # Owner-Album ist das Quell-Album selbst; die anderen Mitglieder-Album-IDs
-        # traegt share_forward nach.
+        # Owner-Album ist das Quell-Album selbst; weitere Mitglieder-Album-IDs
+        # traegt share_forward nach. 'assets' = Content-Dateinamen dieses Albums.
         entry.setdefault("member_albums", {})[alb["owner_id"]] = source_id
+        entry.setdefault("assets", [])
         manifest["groups"][new_hash] = {"members": members}
         unshare_album(args, alb)
 
@@ -920,94 +958,104 @@ def lib_is_share(lib, share_paths) -> bool:
 
 
 def share_forward(args, users, owner_keys, libraries, manifest) -> None:
-    """Phase 3 fuer Share-Libraries: pro Unterordner (=Quell-Album-ID) das eigene
-    Album jedes Mitglieds mit dem Anzeigenamen aus dem Manifest befuellen.
+    """Phase 3 fuer Share-Libraries: jedes Mitglieder-Album aus dem Manifest
+    aufbauen.
 
-    Verwaltung ueber member_albums (Album-ID), nicht ueber den Namen - so
-    kollidieren gleichnamige Alben nicht.
+    Album-Zugehoerigkeit steht als Content-Dateinamen in manifest[..]['assets'].
+    Die importierten External-Assets werden ueber ihren Dateinamen zugeordnet -
+    ein dedupliziertes Bild (eine Datei = ein Asset) landet so in ALLEN Alben,
+    die es enthalten, ohne Duplikat in der Timeline.
     """
     share_paths = share_container_paths(manifest)
     for lib in libraries:
         if not lib_is_share(lib, share_paths):
             continue
-        owner_id = lib["ownerId"]
-        key = owner_keys.get(owner_id)
+        member = lib["ownerId"]
+        key = owner_keys.get(member)
         if key is None:
             continue
         import_paths = lib.get("importPaths") or []
-        assets = search_all(args.url, key, {"libraryId": lib["id"]})
-        groups = group_assets_by_subfolder(assets, import_paths)  # subfolder=source_id
+        this_hash = os.path.basename(import_paths[0].rstrip("/")) if import_paths else ""
+        # Dateiname -> Asset-ID der importierten Bilder dieser Library.
+        fname_to_id = {a.get("originalFileName"): a["id"]
+                       for a in search_all(args.url, key, {"libraryId": lib["id"]})}
         print(f"\nShare-Library '{lib.get('name')}' "
-              f"(Owner {user_label(users, owner_id)}): {len(groups)} Alben")
-        for source_id, asset_ids in sorted(groups.items()):
-            info = manifest["albums"].get(source_id)
-            if not info:
-                print(f"  -> '{source_id}' ohne Manifest-Eintrag - uebersprungen")
+              f"(Owner {user_label(users, member)}):")
+        for source_id, info in manifest["albums"].items():
+            if info.get("hash") != this_hash or member not in info.get("members", []):
                 continue
             name = info.get("name") or f"Album-{source_id[:8]}"
+            want_ids = [fname_to_id[f] for f in info.get("assets", [])
+                        if f in fname_to_id]
             member_albums = info.setdefault("member_albums", {})
-            album_id = member_albums.get(owner_id)
+            album_id = member_albums.get(member)
             album = api_request(args.url, f"/api/albums/{album_id}", key,
                                 tolerant=True, quiet=True) if album_id else None
             if album:
                 added, existed = add_assets_to_album(args.url, key, album_id,
-                                                     asset_ids)
+                                                     want_ids) if want_ids else (0, 0)
                 print(f"  -> '{name}' ({album_id}): {added} neu, {existed} schon drin")
-            else:
-                created = create_album(args.url, key, name, asset_ids)
-                member_albums[owner_id] = created["id"]
+            elif want_ids:
+                created = create_album(args.url, key, name, want_ids)
+                member_albums[member] = created["id"]
                 print(f"  -> '{name}' angelegt ({created['id']}) mit "
-                      f"{len(asset_ids)} Assets")
+                      f"{len(want_ids)} Assets")
 
 
 def share_collect_uploads(args, users, owner_keys, libraries, manifest) -> list[dict]:
-    """Phase 1 fuer Share-Libraries: von Mitgliedern ergaenzte Uploads in den
-    passenden Quell-Album-Ordner (external/<hash>/<source_id>/) kopieren."""
+    """Phase 1 fuer Share-Libraries: interne Bilder der Mitglieder-Alben
+    inhalts-dedupliziert in den Permutationsordner kopieren.
+
+    Pro Permutationsordner existiert jedes eindeutige Bild nur EINMAL
+    (Dateiname = Content-Hash). Die Zugehoerigkeit 'welches Album enthaelt das
+    Bild' landet als Dateiname in manifest[..]['assets'].
+    """
     share_paths = share_container_paths(manifest)
     pending: list[dict] = []
     for lib in libraries:
         if not lib_is_share(lib, share_paths):
             continue
-        owner_id = lib["ownerId"]
-        key = owner_keys.get(owner_id)
+        member = lib["ownerId"]
+        key = owner_keys.get(member)
         if key is None:
             continue
         import_paths = lib.get("importPaths") or []
-        host_root = map_to_host_path(import_paths[0]) if import_paths else None
-        if host_root is None:
+        group_dir = map_to_host_path(import_paths[0]) if import_paths else None
+        if group_dir is None:
             continue
         this_hash = os.path.basename(import_paths[0].rstrip("/"))
-        library_ids = {a["id"] for a in search_all(args.url, key,
-                                                    {"libraryId": lib["id"]})}
         for source_id, info in manifest["albums"].items():
             if info.get("hash") != this_hash:
                 continue
-            album_id = (info.get("member_albums") or {}).get(owner_id)
+            album_id = (info.get("member_albums") or {}).get(member)
             if not album_id:
                 continue
-            # Getrackte ID koennte veraltet sein (Album geloescht) -> tolerant
-            # pruefen und ggf. aus member_albums entfernen, statt zu crashen.
             if not api_request(args.url, f"/api/albums/{album_id}", key,
                                tolerant=True, quiet=True):
-                info.get("member_albums", {}).pop(owner_id, None)
+                info.get("member_albums", {}).pop(member, None)
                 continue
             album_assets = search_all(args.url, key, {"albumIds": [album_id]})
-            candidates = [a for a in album_assets
-                          if a["id"] not in library_ids and not a.get("libraryId")]
-            if not candidates:
-                continue
-            host_dir = os.path.join(host_root, source_id)
-            if not os.path.isdir(host_dir):
-                print(f"  -> FEHLER: Ordner '{host_dir}' fehlt - uebersprungen.")
-                continue
-            for a in candidates:
-                fname = f"{a['id']}_{a.get('originalFileName')}"
-                with open(os.path.join(host_dir, fname), "wb") as fh:
-                    fh.write(download_original(args.url, key, a["id"]))
+            # Nur echte Uploads (kein libraryId) einsammeln.
+            uploads = [a for a in album_assets if not a.get("libraryId")]
+            assets_list = info.setdefault("assets", [])
+            for a in uploads:
+                fname = content_filename(a)
+                raw = None
+                if fname is None:  # kein checksum -> Bytes laden und hashen
+                    raw = download_original(args.url, key, a["id"])
+                    fname = content_filename(a, raw)
+                dest = os.path.join(group_dir, fname)
+                if not os.path.exists(dest):  # Inhalts-Dedup
+                    if raw is None:
+                        raw = download_original(args.url, key, a["id"])
+                    with open(dest, "wb") as fh:
+                        fh.write(raw)
+                    print(f"  {user_label(users, member)}: Bild -> {this_hash}/{fname}")
+                if fname not in assets_list:
+                    assets_list.append(fname)
+                # Upload nach Import (Datei in DIESER Library sichtbar) loeschen.
                 pending.append({"key": key, "upload_id": a["id"],
                                 "filename": fname, "library_id": lib["id"]})
-                print(f"  {user_label(users, owner_id)}: Upload -> "
-                      f"{this_hash}/{source_id}/{fname}")
     return pending
 
 
@@ -1097,8 +1145,8 @@ def main() -> None:
     delete_emptied_albums(args, users, owner_keys, album_counts_before)
 
     if share_active:
-        print("\n=== Phase 6: leere Album-Ordner entfernen ===")
-        remove_empty_album_folders(host_root, manifest)
+        print("\n=== Phase 6: ungenutzte Dateien aufraeumen ===")
+        gc_group_files(host_root, manifest)
 
     if host_root:
         save_manifest(host_root, manifest)
