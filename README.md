@@ -114,16 +114,25 @@ Alice teilt „Sommer 2026" mit Bob und Carol ⇒ Gruppe `{Alice, Bob, Carol}`:
 1. Die Bilder werden nach `external/<hash der Gruppe>/Sommer 2026/` **verschoben**
    (Originale von Alice werden nach dem Import endgueltig geloescht).
 2. Jedes Gruppenmitglied bekommt eine External Library auf `external/<hash>/`.
-3. Die normale Ordner→Album-Engine (Phase 3) legt fuer **jeden** ein eigenes,
+3. Die **native Immich-Freigabe wird aufgeloest** (Modell B) – sonst saehen die
+   anderen das Album doppelt (als Gast **und** als eigene External-Kopie), und es
+   entstuenden Namens-Kollisionen. Die Freigabe war nur der Ausloeser.
+4. Die normale Ordner→Album-Engine (Phase 3) legt fuer **jeden** ein eigenes,
    ihm gehoerendes Album „Sommer 2026" an.
 
 ### Mitgliedschaft ist append-only
 
-Es kann nur jemand **dazukommen**, nie entfernt werden. Waechst die Gruppe
-(`{A,B}` → `{A,B,C}`), zieht der Album-Ordner in den groesseren
-Permutations-Ordner um; das neue Mitglied bekommt seine Library, die anderen
-ziehen mit. **Permutations-Ordner und Libraries werden nie geloescht** (auch leer
-nicht) und bei exakt gleicher Gruppe wiederverwendet.
+Es kann nur jemand **dazukommen**, nie entfernt werden. Da die native Freigabe
+nach dem Verarbeiten aufgeloest wird, fuegt man weitere Leute hinzu, indem man
+das (jetzt external-basierte) Album **erneut kurz teilt** – der naechste Lauf
+erkennt die groessere Gruppe. Waechst sie (`{A,B}` → `{A,B,C}`), zieht der
+Album-Ordner in den groesseren Permutations-Ordner um; das neue Mitglied bekommt
+seine Library, die anderen ziehen mit. **Permutations-Ordner und Libraries werden
+nie geloescht** (auch leer nicht) und bei exakt gleicher Gruppe wiederverwendet.
+
+Neue **Bilder** (statt Nutzer) fuegt jeder einfach seinem eigenen External-Album
+hinzu; Phase 1 kopiert sie in den gemeinsamen Ordner, sodass sie bei allen
+Mitgliedern ankommen – dafuer ist kein erneutes Teilen noetig.
 
 ### Zustand / Manifest
 
@@ -134,9 +143,9 @@ noetig ist.
 
 ### Bekannte Eigenheiten
 
-- Solange das Quell-Album nativ mit den anderen geteilt bleibt (das ist die
-  Steuerung, ueber die man weitere Leute hinzufuegt), sehen diese es
-  **zusaetzlich** als Gast-Album – neben ihrer eigenen External-Kopie.
+- Die native Freigabe wird nach dem Externalisieren **entfernt** – der
+  urspruenglich geteilte Nutzer verliert also die Gast-Ansicht und hat
+  stattdessen sein eigenes, ihm gehoerendes External-Album.
 - Beim Gruppen-Umzug bleiben die alten (nun leeren) Ordner und die zugehoerigen
   Alben der bisherigen Mitglieder bestehen; Immich verschiebt die verwaisten
   Assets beim Rescan in den Papierkorb.

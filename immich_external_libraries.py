@@ -456,7 +456,11 @@ def collect_uploads(args, users, owner_keys, libraries) -> list[dict]:
                 continue
 
             album_assets = search_all(args.url, key, {"albumIds": [album["id"]]})
-            candidates = [a for a in album_assets if a["id"] not in library_ids]
+            # Nur echte Uploads (kein libraryId) einsammeln - external Assets
+            # (evtl. fremden Nutzern gehoerend, z.B. in noch geteilten Alben)
+            # duerfen NICHT erneut kopiert werden, sonst entstehen Duplikate.
+            candidates = [a for a in album_assets
+                          if a["id"] not in library_ids and not a.get("libraryId")]
             print(f"  Ordner '{folder}': Album {len(album_assets)} Assets, "
                   f"ergaenzte Uploads: {len(candidates)}")
             if not candidates:
@@ -532,7 +536,7 @@ def delete_imported_uploads(args, pending, imported) -> None:
 
     total = sum(len(v) for v in to_delete.values())
     for key, ids in to_delete.items():
-        delete_assets(args.url, key, ids, force=True)
+        delete_assets(args.url, key, ids, force=True, tolerant=True)
     print(f"{total} importierte Uploads endgueltig geloescht.")
     if undeleted:
         print(f"WARNUNG: {len(undeleted)} Datei(en) nicht als importiert erkannt, "
@@ -682,6 +686,26 @@ def ensure_group_libraries(args, users, members, ghash, libraries) -> list[dict]
     return libraries
 
 
+def unshare_album(args, alb) -> None:
+    """Loest die native Immich-Freigabe des Quell-Albums auf (Modell B).
+
+    Nach dem Externalisieren bekommt jeder ueber seine eigene External Library
+    sein eigenes Album - die native Freigabe wird entfernt, damit keine
+    Gast-Doppelung (und keine Namens-Kollision in run_forward) entsteht.
+    Mitglieder werden bewusst nur ueber ERNEUTES Teilen ergaenzt (append-only).
+    """
+    removed = 0
+    for uid in alb["members"]:
+        if uid == alb["owner_id"]:
+            continue
+        api_request(args.url, f"/api/albums/{alb['id']}/user/{uid}",
+                    alb["key"], method="DELETE", tolerant=True)
+        removed += 1
+    if removed:
+        print(f"    native Freigabe aufgeloest ({removed} Nutzer) - jeder nutzt "
+              f"seine eigene External-Kopie.")
+
+
 def sync_shared_albums(args, users, owner_keys) -> list[dict]:
     """Phase S: geteilte Alben externalisieren bzw. in groessere Gruppe umziehen.
 
@@ -720,6 +744,7 @@ def sync_shared_albums(args, users, owner_keys) -> list[dict]:
             print("    Gruppe unveraendert - stelle nur Libraries sicher.")
             libraries = ensure_group_libraries(args, users, members, new_hash,
                                                libraries)
+            unshare_album(args, alb)
             continue
 
         os.makedirs(target_host_dir, exist_ok=True)
@@ -756,6 +781,7 @@ def sync_shared_albums(args, users, owner_keys) -> list[dict]:
             "name": alb["name"], "owner": alb["owner_id"],
             "members": members, "hash": new_hash}
         manifest["groups"][new_hash] = {"members": members}
+        unshare_album(args, alb)
 
     save_manifest(host_root, manifest)
 
