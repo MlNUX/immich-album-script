@@ -543,6 +543,36 @@ def delete_imported_uploads(args, pending, imported) -> None:
               f"deren Uploads bleiben erhalten: {', '.join(sorted(undeleted))}")
 
 
+def snapshot_album_counts(args, owner_keys) -> dict:
+    """Merkt sich pro Key-Nutzer die Asset-Zahl je Album (vor den Loeschphasen)."""
+    snap: dict = {}
+    for owner_id, key in owner_keys.items():
+        for a in api_request(args.url, "/api/albums", key) or []:
+            snap[(owner_id, a["id"])] = a.get("assetCount", 0)
+    return snap
+
+
+def delete_emptied_albums(args, users, owner_keys, before) -> None:
+    """Loescht Alben, die durch die Loeschphasen von >0 auf 0 Assets fielen.
+
+    Nur Alben, die zu Beginn des Laufs noch Bilder hatten und jetzt leer sind,
+    werden entfernt - also solche, die das Script selbst leergeraeumt hat.
+    Bereits vorher leere (z.B. manuell angelegte) Alben bleiben unberuehrt.
+    """
+    deleted = 0
+    for owner_id, key in owner_keys.items():
+        for a in api_request(args.url, "/api/albums", key) or []:
+            was = before.get((owner_id, a["id"]))
+            if was and a.get("assetCount", 0) == 0:
+                api_request(args.url, f"/api/albums/{a['id']}", key,
+                            method="DELETE", tolerant=True)
+                print(f"  leeres Album entfernt: '{a.get('albumName')}' "
+                      f"({user_label(users, owner_id)})")
+                deleted += 1
+    if not deleted:
+        print("  keine leergeraeumten Alben.")
+
+
 # ---------------------------------------------------------------------------
 # Phase S: geteilte Alben -> External-Permutationsordner (append-only).
 #
@@ -847,6 +877,10 @@ def main() -> None:
     if not libraries:
         sys.exit("Keine External Libraries gefunden.")
 
+    # Asset-Zahlen merken, um am Ende Alben zu loeschen, die durch die
+    # Loeschphasen komplett leergeraeumt wurden.
+    album_counts_before = snapshot_album_counts(args, owner_keys)
+
     print("\n=== Phase 0: geloeschte Album-Bilder ueberall entfernen ===")
     propagate_deletions(args, users, owner_keys, libraries)
 
@@ -861,6 +895,9 @@ def main() -> None:
 
     print("\n=== Phase 4: importierte Uploads loeschen ===")
     delete_imported_uploads(args, pending, imported)
+
+    print("\n=== Phase 5: leergeraeumte Alben entfernen ===")
+    delete_emptied_albums(args, users, owner_keys, album_counts_before)
 
 
 if __name__ == "__main__":

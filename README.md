@@ -95,6 +95,9 @@ S. **Share-Sync** *(nur wenn `external_root` gesetzt und kein `--library`)* –
    Unterordner-Alben aufnehmen, so sehen alle Nutzer denselben Ordnerinhalt.
 4. **Aufraeumen** – Die erfolgreich importierten Uploads endgueltig loeschen
    (kein Papierkorb).
+5. **Leere Alben entfernen** – Alben, die durch die Loeschphasen von >0 auf 0
+   Bilder gefallen sind (also vom Script leergeraeumt wurden), werden geloescht.
+   Bereits vorher leere Alben bleiben unangetastet.
 
 ## Share-Sync (Phase S)
 
