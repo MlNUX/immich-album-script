@@ -781,6 +781,33 @@ def record_member_albums(args, owner_keys) -> None:
     save_manifest(host_root, manifest)
 
 
+def remove_empty_album_folders(args) -> None:
+    """Loescht leere Album-Unterordner in den Permutationsordnern.
+
+    Die Permutationsordner (external/<hash>/) selbst bleiben immer erhalten - nur
+    leere album-Unterordner darin werden entfernt (z.B. nach einem Gruppen-Umzug
+    oder wenn alle Bilder eines Albums geloescht wurden). Es werden ausschliesslich
+    die im Manifest bekannten Gruppen-Ordner angefasst.
+    """
+    host_root = map_to_host_path(EXTERNAL_ROOT)
+    if host_root is None:
+        return
+    manifest = load_manifest(host_root)
+    removed = 0
+    for ghash in manifest.get("groups", {}):
+        group_dir = os.path.join(host_root, ghash)
+        if not os.path.isdir(group_dir):
+            continue
+        for name in os.listdir(group_dir):
+            sub = os.path.join(group_dir, name)
+            if os.path.isdir(sub) and not os.listdir(sub):
+                os.rmdir(sub)
+                removed += 1
+                print(f"  leerer Album-Ordner entfernt: {ghash}/{name}")
+    if not removed:
+        print("  keine leeren Album-Ordner.")
+
+
 def reconcile_album_renames(args, owner_keys, manifest, host_root) -> None:
     """Zieht Umbenennungen aus JEDEM Konto nach (Modell A).
 
@@ -912,7 +939,8 @@ def sync_shared_albums(args, users, owner_keys) -> list[dict]:
                                 "owner_id": alb["owner_id"], "group_hash": new_hash})
         else:
             # Gruppe gewachsen: Album-Ordner in den groesseren Permutationsordner
-            # verschieben (alten leeren Ordner bewusst stehen lassen).
+            # verschieben. Der alte, nun leere Album-Unterordner wird in Phase 6
+            # entfernt; der alte Permutationsordner selbst bleibt bestehen.
             old_host_dir = os.path.join(host_root, prev_hash, alb["name"])
             print(f"    Umzug {prev_hash} -> {new_hash}")
             if os.path.isdir(old_host_dir):
@@ -1020,9 +1048,11 @@ def main() -> None:
     print("\n=== Phase 5: leergeraeumte Alben entfernen ===")
     delete_emptied_albums(args, users, owner_keys, album_counts_before)
 
-    # Album-IDs je Mitglied festhalten, damit reconcile beim naechsten Lauf eine
-    # Umbenennung in jedem Konto erkennt.
     if EXTERNAL_ROOT and not args.library:
+        print("\n=== Phase 6: leere Album-Ordner entfernen ===")
+        remove_empty_album_folders(args)
+        # Album-IDs je Mitglied festhalten, damit reconcile beim naechsten Lauf
+        # eine Umbenennung in jedem Konto erkennt.
         record_member_albums(args, owner_keys)
 
 

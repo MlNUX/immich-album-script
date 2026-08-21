@@ -98,6 +98,9 @@ S. **Share-Sync** *(nur wenn `external_root` gesetzt und kein `--library`)* –
 5. **Leere Alben entfernen** – Alben, die durch die Loeschphasen von >0 auf 0
    Bilder gefallen sind (also vom Script leergeraeumt wurden), werden geloescht.
    Bereits vorher leere Alben bleiben unangetastet.
+6. **Leere Album-Ordner entfernen** – leere Album-Unterordner in den
+   Permutations-Ordnern werden geloescht; die Permutations-Ordner selbst bleiben.
+   (Nur bei aktivem Share-Sync.)
 
 ## Share-Sync (Phase S)
 
@@ -130,8 +133,11 @@ nach dem Verarbeiten aufgeloest wird, fuegt man weitere Leute hinzu, indem man
 das (jetzt external-basierte) Album **erneut kurz teilt** – der naechste Lauf
 erkennt die groessere Gruppe. Waechst sie (`{A,B}` → `{A,B,C}`), zieht der
 Album-Ordner in den groesseren Permutations-Ordner um; das neue Mitglied bekommt
-seine Library, die anderen ziehen mit. **Permutations-Ordner und Libraries werden
-nie geloescht** (auch leer nicht) und bei exakt gleicher Gruppe wiederverwendet.
+seine Library, die anderen ziehen mit. **Permutations-Ordner (`external/<hash>/`)
+und Libraries werden nie geloescht** (auch leer nicht) und bei exakt gleicher
+Gruppe wiederverwendet. Leere **Album-Unterordner** darin werden dagegen entfernt
+(Phase 6) – etwa der zurueckbleibende Ordner nach einem Umzug oder wenn alle
+Bilder eines Albums geloescht wurden.
 
 Neue **Bilder** (statt Nutzer) fuegt jeder einfach seinem eigenen External-Album
 hinzu; Phase 1 kopiert sie in den gemeinsamen Ordner, sodass sie bei allen
