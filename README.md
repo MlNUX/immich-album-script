@@ -144,6 +144,15 @@ welcher Gruppe/welchem Ordner gehoert). Daran erkennt das Script bei jedem Lauf,
 ob eine Gruppe gewachsen ist. JSON statt YAML, damit keine Zusatz-Abhaengigkeit
 noetig ist.
 
+### Umbenennen
+
+Der **Ordnername ist die Wahrheit**, nicht der Albumname. Benennt der **Owner**
+sein (getracktes) Album um, zieht das Script den Disk-Ordner mit um; beim selben
+Lauf legen die Mitglieder-Libraries die neu benannten Alben an, die alten (nun
+leeren) entfernt Phase 5. Nur der Owner-Rename zaehlt (nur sein Album steht im
+Manifest). Benennt ein **Nicht-Owner** seine Kopie um, wird beim naechsten Lauf
+wieder ein Album mit dem Ordnernamen angelegt – die Umbenennung haelt also nicht.
+
 ### Bekannte Eigenheiten
 
 - Die native Freigabe wird nach dem Externalisieren **entfernt** – der

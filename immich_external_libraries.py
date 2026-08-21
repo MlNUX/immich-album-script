@@ -748,6 +748,42 @@ def unshare_album(args, alb) -> None:
               f"seine eigene External-Kopie.")
 
 
+def reconcile_album_renames(args, owner_keys, manifest, host_root) -> None:
+    """Zieht Owner-Umbenennungen nach (Modell A).
+
+    Heisst das getrackte Quell-Album jetzt anders als im Manifest, wird der
+    Disk-Ordner mitbenannt und der Manifest-Name aktualisiert. Da alle Libraries
+    auf den Gruppenordner zeigen, sehen die Mitglieder danach den neuen
+    Unterordner-Namen und run_forward legt die (neu benannten) Alben an; die alten
+    (nun leeren) Alben entfernt Phase 5. Nur der Owner-Rename zaehlt - nur sein
+    Album ist im Manifest hinterlegt.
+    """
+    for album_id, info in manifest["albums"].items():
+        key = owner_keys.get(info.get("owner"))
+        if not key:
+            continue
+        album = api_request(args.url, f"/api/albums/{album_id}", key,
+                            tolerant=True)
+        if not album:
+            continue  # geloescht o.ae. - hier nicht behandelt
+        current = (album.get("albumName") or "").strip()
+        old = info.get("name")
+        if not current or current == old:
+            continue
+        ghash = info.get("hash")
+        old_dir = os.path.join(host_root, ghash, old)
+        new_dir = os.path.join(host_root, ghash, current)
+        if os.path.isdir(old_dir):
+            if os.path.exists(new_dir):
+                print(f"  WARNUNG: Umbenennung '{old}' -> '{current}' "
+                      f"uebersprungen - Zielordner existiert schon.")
+                continue
+            shutil.move(old_dir, new_dir)
+        info["name"] = current
+        print(f"  Album umbenannt: '{old}' -> '{current}' ({ghash}) - "
+              f"Mitglieder-Alben ziehen nach.")
+
+
 def sync_shared_albums(args, users, owner_keys) -> list[dict]:
     """Phase S: geteilte Alben externalisieren bzw. in groessere Gruppe umziehen.
 
@@ -762,9 +798,13 @@ def sync_shared_albums(args, users, owner_keys) -> list[dict]:
         return []
 
     manifest = load_manifest(host_root)
+    # Owner-Umbenennungen zuerst nachziehen (auch fuer bereits unshared Alben).
+    reconcile_album_renames(args, owner_keys, manifest, host_root)
+
     albums = collect_shared_albums(args, users, owner_keys)
     if not albums:
         print("  keine geteilten Alben gefunden.")
+        save_manifest(host_root, manifest)  # Rename-Reconcile evtl. geaendert
         return []
 
     libraries = get_external_libraries(args.url, args.admin_key)
